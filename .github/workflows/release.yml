@@ -1,1 +1,59 @@
+name: Publicar versión
 
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Número de versión (por ejemplo 1.0.1)"
+        required: true
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Fijar la versión
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $v = $env:INPUT_VERSION
+          if (-not $v -and $env:REF_NAME -like 'v*') { $v = $env:REF_NAME }
+          if (-not $v) { throw "No se indicó la versión." }
+          $v = $v.TrimStart('v')
+          npm version $v --no-git-tag-version --allow-same-version
+
+      - name: Conseguir svcl.exe si falta
+        shell: pwsh
+        run: |
+          if (-not (Test-Path bin/svcl.exe)) {
+            New-Item -ItemType Directory -Force bin | Out-Null
+            try {
+              Invoke-WebRequest "https://www.nirsoft.net/utils/svcl-x64.zip" `
+                -Headers @{ Referer = "https://www.nirsoft.net/utils/sound_volume_command_line.html" } `
+                -OutFile svcl.zip
+              Expand-Archive svcl.zip -DestinationPath svcl-tmp -Force
+              Copy-Item svcl-tmp/svcl.exe bin/svcl.exe
+            } catch {
+              throw "No se pudo descargar svcl.exe. Súbelo manualmente a la carpeta bin/ del repositorio."
+            }
+          }
+
+      - run: npm install
+
+      - name: Construir y publicar
+        run: npx electron-builder --win --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
