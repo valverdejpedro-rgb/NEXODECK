@@ -182,6 +182,7 @@ async function listApps() {
 
   // Las apps que solo tienen sesión de entrada se muestran únicamente mientras usan el micrófono.
   const list = [...groups.values()]
+    .filter((g) => !/system ?sounds|sonidos del sistema|systemsounds/i.test(`${g.name} ${g.target}`) && !/audiosrv/i.test(g.procPath || ''))
     .filter((g) => g.render || (g.capture && g.capture.active))
     .sort((a, b) => a.name.localeCompare(b.name, 'es', { sensitivity: 'base' }));
   for (const a of list) a.icon = await iconFor(a.procPath);
@@ -470,6 +471,8 @@ const NOT_GAMES = /^(dwm|explorer|searchhost|searchapp|startmenuexperiencehost|s
 function resetFps() { fpsState.offset = 0; fpsState.header = null; fpsState.carry = ''; fpsState.apps.clear(); fpsState.rows = 0; fpsState.lastRowAt = 0; fpsState.utf16 = false; }
 
 function ingestFps() {
+  for (const a of fpsState.apps.values()) a.batch = null; // FPS de la lectura actual (solo si llegaron fotogramas nuevos)
+  const touched = new Map();
   const file = path.join(sensorDir(), 'fps.csv');
   let st;
   try { st = fs.statSync(file); } catch { resetFps(); return; }
@@ -490,7 +493,7 @@ function ingestFps() {
       const h = first.split(',').map((x) => x.trim().toLowerCase());
       // Según la versión, PresentMon llama al tiempo entre fotogramas "FrameTime" o "MsBetweenPresents".
       const iFt = h.indexOf('msbetweenpresents') >= 0 ? h.indexOf('msbetweenpresents') : h.indexOf('frametime');
-      fpsState.header = { app: h.indexOf('application'), ft: iFt, cols: h.length };
+      fpsState.header = { app: h.indexOf('application'), ft: iFt, pid: h.indexOf('processid'), cols: h.length };
       // Se busca el fin real de la primera línea en bytes (funciona con \n o \r\n)
       // PowerShell guarda la salida de PresentMon en UTF-16 (empieza con FF FE): cada carácter ocupa 2 bytes.
       fpsState.utf16 = n >= 2 && b[0] === 0xff && b[1] === 0xfe;
@@ -517,7 +520,7 @@ function ingestFps() {
     const lines = (fpsState.carry + buf.toString(fpsState.utf16 ? 'utf16le' : 'utf8')).split(/\r?\n/);
     fpsState.carry = lines.pop();
     if (fpsState.dropFirst) { lines.shift(); fpsState.dropFirst = false; }
-    const { app: ia, ft: ift } = fpsState.header;
+    const { app: ia, ft: ift, pid: ipid } = fpsState.header;
     if (ia < 0) return;
     const now = Date.now();
     for (const line of lines) {
@@ -530,9 +533,20 @@ function ingestFps() {
       let a = fpsState.apps.get(name);
       if (!a) { a = { frames: [], last: 0 }; fpsState.apps.set(name, a); }
       a.last = now;
-      if (Number.isFinite(ft) && ft > 0.2 && ft < 2000) a.frames.push({ t: now, ft });
+      const pidv = ipid >= 0 ? parseInt(c[ipid], 10) : 0;
+      if (pidv > 0) a.pid = pidv;
+      if (Number.isFinite(ft) && ft > 0.2 && ft < 2000) {
+        a.frames.push({ t: now, ft });
+        const t = touched.get(name) || { n: 0, sum: 0 };
+        t.n++; t.sum += ft; touched.set(name, t);
+      }
     }
   } catch (e) { fpsState.err = `${e.code || ''} ${e.message}`.trim(); } finally { if (fd !== undefined) try { fs.closeSync(fd); } catch {} }
+  // FPS de esta lectura = fotogramas recibidos / tiempo que sumaron esos fotogramas
+  for (const [name, t] of touched) {
+    const a = fpsState.apps.get(name);
+    if (a && t.n >= 5 && t.sum > 0) a.batch = { fps: (1000 * t.n) / t.sum, n: t.n };
+  }
   const now = Date.now();
   for (const [k, a] of fpsState.apps) {
     a.frames = a.frames.filter((f) => now - f.t < 10000);
@@ -551,10 +565,115 @@ function currentGame() {
     const mean = recent.reduce((s, f) => s + f.ft, 0) / recent.length;
     const fps = 1000 / mean;
     if (fps < 5) continue;
-    if (!best || fps > best.fps) best = { app: name, name: base, fps };
+    if (!best || fps > best.fps) best = { app: name, name: base, fps, pid: a.pid || 0, batch: a.batch || null };
   }
   return best;
 }
+
+
+// FPS más bajo y más alto de la sesión: cada valor es el promedio de una lectura (~1 s).
+// Se ignoran los primeros 5 s del juego (pantallas de carga al abrir). Se reinicia al cambiar de juego.
+let gameStats = { app: '', min: null, max: null, since: 0, lastSeen: 0 };
+function trackFps(game) {
+  const now = Date.now();
+  if (!game) { if (now - gameStats.lastSeen > 15000) gameStats = { app: '', min: null, max: null, since: 0, lastSeen: 0 }; return; }
+  if (gameStats.app !== game.app) gameStats = { app: game.app, min: null, max: null, since: now, lastSeen: now };
+  gameStats.lastSeen = now;
+  if (now - gameStats.since < 5000 || !game.batch) return;
+  const v = game.batch.fps;
+  if (v < 1) return;
+  if (gameStats.min == null || v < gameStats.min) gameStats.min = v;
+  if (gameStats.max == null || v > gameStats.max) gameStats.max = v;
+}
+ipcMain.handle('game:resetStats', () => { gameStats.min = null; gameStats.max = null; gameStats.since = Date.now() - 5000; });
+
+// Qué tarjeta gráfica usa el juego: Windows mide el uso por proceso y por tarjeta (contadores "GPU Engine").
+// Se acumula durante la sesión y gana la tarjeta con más trabajo. También se lee la ruta del .exe del juego.
+const GPU_PREF_KEY = 'HKCU\\Software\\Microsoft\\DirectX\\UserGpuPreferences';
+const gameGpu = { pid: 0, path: '', pref: null, acc: new Map(), at: 0, busy: false, luidNames: null, luidAt: 0, luidBusy: false };
+const psEncoded = (script) => Buffer.from(script, 'utf16le').toString('base64');
+const luidKey = (hi, lo) => ((BigInt('0x' + hi) << 32n) | BigInt('0x' + lo)).toString();
+
+function loadLuidNames() {
+  if (gameGpu.luidBusy || (gameGpu.luidNames && Date.now() - gameGpu.luidAt < 600000)) return;
+  gameGpu.luidBusy = true;
+  const script = `Get-PnpDevice -Class Display -PresentOnly -ErrorAction SilentlyContinue | ForEach-Object {
+  $l = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName '{60b193cb-5276-4d0f-96fc-f173abad3ec6} 2' -ErrorAction SilentlyContinue).Data
+  "LUID|$l|$($_.FriendlyName)"
+}`;
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', psEncoded(script)],
+    { windowsHide: true, timeout: 15000 }, (err, so) => {
+      gameGpu.luidBusy = false;
+      gameGpu.luidAt = Date.now();
+      const map = new Map();
+      if (!err) for (const line of String(so).split(/\r?\n/)) {
+        const m = line.match(/^LUID\|(\d+)\|(.+)$/);
+        if (m) map.set(m[1], m[2].trim());
+      }
+      gameGpu.luidNames = map;
+    });
+}
+
+function readGpuPref() {
+  if (!gameGpu.path) return;
+  execFile('reg.exe', ['query', GPU_PREF_KEY, '/v', gameGpu.path], { windowsHide: true, timeout: 5000 }, (err, so) => {
+    const m = !err && String(so).match(/GpuPreference=(\d)/i);
+    gameGpu.pref = m ? Number(m[1]) : 0;
+  });
+}
+
+function pollGameGpu(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  if (gameGpu.pid !== pid) Object.assign(gameGpu, { pid, path: '', pref: null, acc: new Map(), at: 0 });
+  loadLuidNames();
+  if (gameGpu.busy || Date.now() - gameGpu.at < 5000) return;
+  gameGpu.busy = true;
+  gameGpu.at = Date.now();
+  const script = `$p = ${pid}
+try { 'PATH|' + (Get-Process -Id $p -ErrorAction Stop).Path } catch {}
+Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -Filter "Name LIKE 'pid_${pid}_%'" -ErrorAction SilentlyContinue | ForEach-Object { 'ENG|' + $_.Name + '|' + $_.UtilizationPercentage }`;
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', psEncoded(script)],
+    { windowsHide: true, timeout: 15000 }, (err, so) => {
+      gameGpu.busy = false;
+      if (err || gameGpu.pid !== pid) return;
+      for (const line of String(so).split(/\r?\n/)) {
+        const pm = line.match(/^PATH\|(.+\.exe)\s*$/i);
+        if (pm && !gameGpu.path) { gameGpu.path = pm[1]; readGpuPref(); }
+        const em = line.match(/^ENG\|pid_(\d+)_luid_0x([0-9a-f]+)_0x([0-9a-f]+)_phys_(\d+)_eng_\d+_engtype_([^|]+)\|([\d.]+)/i);
+        if (!em || Number(em[1]) !== pid || !/3D|graphics|compute/i.test(em[5])) continue;
+        const key = luidKey(em[2], em[3]);
+        const cur = gameGpu.acc.get(key) || { sum: 0, phys: Number(em[4]) };
+        cur.sum += parseFloat(em[6]) || 0;
+        gameGpu.acc.set(key, cur);
+      }
+    });
+}
+
+function gameGpuInfo() {
+  let best = null, bestKey = '';
+  for (const [k, v] of gameGpu.acc) if (v.sum > 0 && (!best || v.sum > best.sum)) { best = v; bestKey = k; }
+  const hasNvidia = (gpuNames || []).some((n) => vendorOf(n) === 'nvidia');
+  let gpu = null;
+  if (best) {
+    const name = (gameGpu.luidNames && gameGpu.luidNames.get(bestKey)) || '';
+    gpu = { name: name || `Tarjeta gráfica ${best.phys + 1}`, vendor: name ? vendorOf(name) : 'otra', known: !!name };
+  }
+  return { gpu, hasNvidia, canSet: !!gameGpu.path, pref: gameGpu.pref };
+}
+
+ipcMain.handle('game:setGpu', (_, pref) => new Promise((resolve) => {
+  const p = Number(pref);
+  if (![0, 1, 2].includes(p) || !gameGpu.path) return resolve({ ok: false });
+  const args = p === 0
+    ? ['delete', GPU_PREF_KEY, '/v', gameGpu.path, '/f']
+    : ['add', GPU_PREF_KEY, '/v', gameGpu.path, '/t', 'REG_SZ', '/d', `GpuPreference=${p};`, '/f'];
+  execFile('reg.exe', args, { windowsHide: true, timeout: 5000 }, (err) => {
+    // borrar un valor que no existe da error, y entonces ya está en "Windows decide"
+    if (err && p !== 0) return resolve({ ok: false });
+    gameGpu.pref = p;
+    resolve({ ok: true });
+  });
+}));
 
 const helperActive = () => {
   try { return Date.now() - fs.statSync(path.join(sensorDir(), 'heartbeat.txt')).mtimeMs < 7000; } catch { return false; }
@@ -586,6 +705,8 @@ ipcMain.handle('sys:state', async () => {
   let game = null;
   if (helper) { ingestFps(); game = currentGame(); } else if (fpsState.apps.size) resetFps();
   const cpuTemp = lhm ? lhm.cpuTemp : null;
+  trackFps(game);
+  if (game) pollGameGpu(game.pid);
 
   // Punto más caliente: el sensor de temperatura más alto de todo el equipo (no es un promedio)
   let hottest = lhm && lhm.general ? lhm.general : null;
@@ -600,7 +721,7 @@ ipcMain.handle('sys:state', async () => {
     fans: (lhm && lhm.fans.length) ? lhm.fans : wmiFans(),
     general: hottest,
     sensors: { lhm: !!lhm, helper, hasFiles: fs.existsSync(HELPER_PS1) },
-    game: game ? { name: game.name, fps: game.fps } : null,
+    game: game ? { name: game.name, fps: game.fps, min: gameStats.min, max: gameStats.max, ...gameGpuInfo() } : null,
   };
 });
 

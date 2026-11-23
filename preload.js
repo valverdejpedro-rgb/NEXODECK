@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('api', {
   getPower: () => ipcRenderer.invoke('power:list'),
   setPower: (id) => ipcRenderer.invoke('power:set', id),
   getSystem: () => ipcRenderer.invoke('sys:state'),
+  setGameGpu: (pref) => ipcRenderer.invoke('game:setGpu', pref),
+  resetGameStats: () => ipcRenderer.invoke('game:resetStats'),
   enableSensors: () => ipcRenderer.invoke('sys:enable'),
   info: () => ipcRenderer.invoke('app:info'),
   checkUpdates: () => ipcRenderer.invoke('update:check'),

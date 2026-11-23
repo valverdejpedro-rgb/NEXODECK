@@ -539,12 +539,31 @@ function setStat(id, o) {
   c.note.hidden = !o.note;
 }
 
-/* FPS del juego (solo FPS) */
+/* Juego: FPS actual, más bajo / más alto y gráfica que usa */
 const GAME_TEMPLATE = `
   <div class="game-idle"></div>
   <div class="game-body" hidden>
-    <div class="game-head"><span class="game-title"></span><span class="game-tag">Jugando</span></div>
-    <div class="game-fps"><span class="big fps">–</span><span class="unit">FPS</span></div>
+    <div class="game-top">
+      <div class="game-id">
+        <div class="game-head"><span class="game-title"></span><span class="game-tag">Jugando</span></div>
+        <div class="game-fps"><span class="big fps">–</span><span class="unit">FPS</span></div>
+      </div>
+      <div class="game-range">
+        <div class="range lo"><span class="range-lbl">Más bajo</span><b class="range-val rmin">–</b></div>
+        <div class="range hi"><span class="range-lbl">Más alto</span><b class="range-val rmax">–</b></div>
+        <button class="mini reset-range" type="button">Reiniciar</button>
+      </div>
+    </div>
+    <div class="game-gpu">
+      <div class="gpu-line"><span class="gpu-lbl">Gráfica que usa el juego</span><b class="gpu-name">Detectando…</b></div>
+      <p class="gpu-msg"></p>
+      <div class="gpu-pref" role="group" aria-label="Gráfica preferida por Windows para este juego">
+        <button type="button" data-pref="0">Windows decide</button>
+        <button type="button" data-pref="1">Ahorro de energía</button>
+        <button type="button" data-pref="2">Alto rendimiento</button>
+      </div>
+      <p class="gpu-hint"></p>
+    </div>
   </div>`;
 sysGameEl.innerHTML = GAME_TEMPLATE;
 const gm = {
@@ -552,7 +571,26 @@ const gm = {
   body: sysGameEl.querySelector('.game-body'),
   title: sysGameEl.querySelector('.game-title'),
   fps: sysGameEl.querySelector('.fps'),
+  min: sysGameEl.querySelector('.rmin'),
+  max: sysGameEl.querySelector('.rmax'),
+  reset: sysGameEl.querySelector('.reset-range'),
+  gpuName: sysGameEl.querySelector('.gpu-name'),
+  gpuMsg: sysGameEl.querySelector('.gpu-msg'),
+  prefBox: sysGameEl.querySelector('.gpu-pref'),
+  prefBtns: [...sysGameEl.querySelectorAll('.gpu-pref button')],
+  hint: sysGameEl.querySelector('.gpu-hint'),
 };
+let prefSent = null; // preferencia recién enviada (se muestra al instante mientras se confirma)
+
+gm.reset.addEventListener('click', () => { window.api.resetGameStats(); gm.min.textContent = '–'; gm.max.textContent = '–'; });
+gm.prefBtns.forEach((b) => b.addEventListener('click', async () => {
+  const pref = Number(b.dataset.pref);
+  prefSent = pref;
+  gm.prefBtns.forEach((x) => x.classList.toggle('on', x === b));
+  const res = await window.api.setGameGpu(pref).catch(() => ({ ok: false }));
+  if (!res.ok) { prefSent = null; gm.hint.textContent = 'No se pudo guardar el cambio.'; }
+  else gm.hint.textContent = 'Guardado. Cierra el juego y vuelve a abrirlo para que Windows use esta gráfica.';
+}));
 
 function renderGame(s) {
   if (!s.sensors.helper) { sysGameEl.hidden = true; return; }
@@ -562,10 +600,33 @@ function renderGame(s) {
   gm.body.hidden = !g;
   if (!g) {
     gm.idle.textContent = 'Sin juego detectado. Abre un juego y aquí verás sus FPS.';
+    prefSent = null;
     return;
   }
   gm.title.textContent = g.name;
   gm.fps.textContent = Math.round(g.fps);
+  gm.min.textContent = g.min == null ? '–' : Math.round(g.min);
+  gm.max.textContent = g.max == null ? '–' : Math.round(g.max);
+
+  // Gráfica en uso y si conviene cambiarla
+  const gp = g.gpu;
+  gm.gpuName.textContent = gp ? gp.name : 'Detectando… (necesita unos segundos de juego)';
+  gm.gpuName.dataset.state = '';
+  gm.gpuMsg.textContent = '';
+  if (gp) {
+    if (gp.vendor === 'nvidia') {
+      gm.gpuName.dataset.state = 'ok';
+      gm.gpuMsg.textContent = 'Está usando la tarjeta dedicada NVIDIA. Es lo esperado para jugar.';
+    } else if (g.hasNvidia) {
+      gm.gpuName.dataset.state = 'warn';
+      gm.gpuMsg.textContent = 'Está usando otra tarjeta y tu equipo tiene una NVIDIA, que normalmente rinde mucho más. Prueba "Alto rendimiento".';
+    }
+  }
+  const pref = prefSent != null ? prefSent : g.pref;
+  gm.prefBtns.forEach((b) => b.classList.toggle('on', pref != null && Number(b.dataset.pref) === pref));
+  gm.prefBox.hidden = !g.canSet;
+  if (!g.canSet) gm.hint.textContent = 'No se pudo leer la ruta de este juego, así que no se puede cambiar su gráfica desde aquí.';
+  else if (!gm.hint.textContent || /No se pudo leer la ruta/.test(gm.hint.textContent)) gm.hint.textContent = 'El cambio se aplica al volver a abrir el juego. Algunos juegos eligen su gráfica en sus propios ajustes.';
 }
 
 function renderBanner(s) {
