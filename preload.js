@@ -8,8 +8,6 @@ contextBridge.exposeInMainWorld('api', {
   info: () => ipcRenderer.invoke('app:info'),
   checkUpdates: () => ipcRenderer.invoke('update:check'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
-  resize: (h) => ipcRenderer.send('ui:resize', h),
-  hide: () => ipcRenderer.send('ui:hide'),
   onUpdate: (cb) => ipcRenderer.on('update:status', (_, s) => cb(s)),
   onShown: (cb) => ipcRenderer.on('ui:shown', () => cb()),
 });

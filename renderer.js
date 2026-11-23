@@ -133,16 +133,12 @@ function renderUpdate(s) {
   }
 }
 
-window.addEventListener('keydown', (e) => { if (e.key === 'Escape') window.api.hide(); });
-
 window.api.onUpdate(renderUpdate);
 window.api.onShown(refresh);
 window.api.info().then((i) => {
   versionEl.textContent = `Versión ${i.version}`;
   renderUpdate(i.update);
 });
-
-new ResizeObserver(() => window.api.resize(document.documentElement.scrollHeight)).observe(document.getElementById('app'));
 
 refresh();
 setInterval(() => { if (!document.hidden) refresh(); }, 2500);

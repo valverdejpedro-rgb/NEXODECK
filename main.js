@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, globalShortcut, screen, nativeImage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, globalShortcut, nativeImage } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { execFile } = require('child_process');
 const path = require('path');
@@ -6,12 +6,13 @@ const fs = require('fs');
 const os = require('os');
 
 const SHORTCUT = 'Control+Alt+V';
-const WIDTH = 400;
+const LOGIN_ARGS = ['--hidden'];
+const startHidden = process.argv.includes('--hidden');
 
 let win = null;
 let tray = null;
 let quitting = false;
-let lastHide = 0;
+let settings = {};
 let updateStatus = { state: 'idle' };
 
 const SVCL = app.isPackaged
@@ -113,41 +114,47 @@ ipcMain.handle('audio:setVolume', (_, id, pct) => {
 ipcMain.handle('audio:toggleMute', (_, id) => validId(id) && svcl(['/Switch', id]));
 ipcMain.handle('audio:setDefault', (_, id) => validId(id) && svcl(['/SetDefault', id, 'all']));
 
-/* ---------- Ventana ---------- */
+/* ---------- Ajustes guardados ---------- */
 
-function position() {
-  if (!win) return;
-  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-  const wa = display.workArea;
-  const [w, h] = win.getSize();
-  win.setPosition(wa.x + wa.width - w - 12, wa.y + wa.height - h - 12);
+const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
+function loadSettings() {
+  try { return JSON.parse(fs.readFileSync(settingsFile(), 'utf8')); } catch { return {}; }
 }
+function saveSettings() {
+  try { fs.writeFileSync(settingsFile(), JSON.stringify(settings)); } catch {}
+}
+const loginEnabled = () => app.getLoginItemSettings({ args: LOGIN_ARGS }).openAtLogin;
+
+/* ---------- Ventana ---------- */
 
 function showWindow() {
   if (!win) return;
-  position();
+  if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
-  win.webContents.send('ui:shown');
 }
 
+// Atajo global: si la ventana ya está en primer plano la minimiza; si no, la trae al frente.
 function toggleWindow() {
-  if (win.isVisible()) win.hide();
-  else if (Date.now() - lastHide > 250) showWindow();
+  if (!win) return;
+  if (win.isVisible() && !win.isMinimized() && win.isFocused()) {
+    if (settings.keepInTray) win.hide(); else win.minimize();
+  } else showWindow();
 }
 
 function createWindow() {
+  const b = settings.bounds || {};
   win = new BrowserWindow({
-    width: WIDTH,
-    height: 300,
+    width: b.width || 460,
+    height: b.height || 430,
+    x: b.x,
+    y: b.y,
+    minWidth: 380,
+    minHeight: 360,
     show: false,
-    frame: false,
-    resizable: false,
-    skipTaskbar: true,
-    alwaysOnTop: true,
-    fullscreenable: false,
-    maximizable: false,
-    minimizable: false,
+    title: 'Centro de Control',
+    icon: path.join(__dirname, 'assets', 'icon.png'),
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -157,33 +164,40 @@ function createWindow() {
   });
   win.setMenuBarVisibility(false);
   win.loadFile('index.html');
-  win.on('blur', () => {
-    if (!win.webContents.isDevToolsOpened()) { lastHide = Date.now(); win.hide(); }
+
+  win.once('ready-to-show', () => {
+    if (startHidden) { win.showInactive(); win.minimize(); } // arranque con Windows: queda en la barra de tareas
+    else win.show();
   });
+
+  win.on('focus', () => win.webContents.send('ui:shown'));
+  win.on('restore', () => win.webContents.send('ui:shown'));
+
   win.on('close', (e) => {
-    if (!quitting) { e.preventDefault(); win.hide(); }
+    try { settings.bounds = win.getNormalBounds(); saveSettings(); } catch {}
+    // Con "Mantener en segundo plano" la X solo oculta la ventana; si no, cierra el programa.
+    if (!quitting && settings.keepInTray) { e.preventDefault(); win.hide(); }
   });
 }
-
-ipcMain.on('ui:resize', (_, h) => {
-  if (!win) return;
-  const height = Math.max(120, Math.min(700, Math.round(Number(h) || 300)));
-  win.setContentSize(WIDTH, height);
-  if (win.isVisible()) position();
-});
-ipcMain.on('ui:hide', () => win && win.hide());
 
 /* ---------- Bandeja ---------- */
 
 function buildMenu() {
   return Menu.buildFromTemplate([
-    { label: `Mostrar u ocultar  (${SHORTCUT.replace('Control', 'Ctrl')})`, click: toggleWindow },
+    { label: 'Abrir Centro de Control', click: showWindow },
+    { label: `Minimizar / traer al frente  (${SHORTCUT.replace('Control', 'Ctrl')})`, click: toggleWindow },
     { type: 'separator' },
+    {
+      label: 'Mantener en segundo plano al cerrar',
+      type: 'checkbox',
+      checked: !!settings.keepInTray,
+      click: (item) => { settings.keepInTray = item.checked; saveSettings(); },
+    },
     {
       label: 'Iniciar con Windows',
       type: 'checkbox',
-      checked: app.getLoginItemSettings().openAtLogin,
-      click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked }),
+      checked: loginEnabled(),
+      click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked, args: LOGIN_ARGS }),
     },
     { label: 'Buscar actualizaciones', click: checkForUpdates },
     { type: 'separator' },
@@ -198,7 +212,7 @@ function createTray() {
     .resize({ width: 16, height: 16 });
   tray = new Tray(icon);
   tray.setToolTip('Centro de Control');
-  tray.on('click', toggleWindow);
+  tray.on('click', showWindow);
   tray.on('right-click', () => tray.popUpContextMenu(buildMenu()));
 }
 
@@ -241,21 +255,26 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', showWindow);
 
   app.whenReady().then(() => {
+    settings = loadSettings();
     createWindow();
     createTray();
     setupUpdater();
     globalShortcut.register(SHORTCUT, toggleWindow);
 
-    // La primera vez que se instala, se configura para iniciar con Windows.
     if (app.isPackaged) {
+      // Instalaciones anteriores: pasar el inicio automático al modo "arrancar minimizado".
+      if (!loginEnabled() && app.getLoginItemSettings().openAtLogin) {
+        app.setLoginItemSettings({ openAtLogin: true, args: LOGIN_ARGS });
+      }
+      // La primera vez que se instala, se configura para iniciar con Windows.
       const flag = path.join(app.getPath('userData'), 'primer-inicio');
       if (!fs.existsSync(flag)) {
-        app.setLoginItemSettings({ openAtLogin: true });
+        app.setLoginItemSettings({ openAtLogin: true, args: LOGIN_ARGS });
         try { fs.writeFileSync(flag, '1'); } catch {}
       }
     }
   });
 
-  app.on('window-all-closed', () => {});
+  app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => globalShortcut.unregisterAll());
 }
