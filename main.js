@@ -388,7 +388,7 @@ function summarizeLhm(sensors) {
 }
 
 // FPS: PresentMon (ayudante) escribe un CSV; se lee de forma incremental.
-const fpsState = { offset: 0, size: 0, header: null, carry: '', apps: new Map(), rows: 0, lastRowAt: 0 };
+const fpsState = { offset: 0, size: 0, header: null, carry: '', apps: new Map(), rows: 0, lastRowAt: 0, err: '', firstBytes: '', firstLine: '' };
 const NOT_GAMES = /^(dwm|explorer|searchhost|searchapp|startmenuexperiencehost|shellexperiencehost|textinputhost|applicationframehost|systemsettings|taskmgr|lockapp|widgets|chrome|msedge|msedgewebview2|firefox|brave|opera|vivaldi|iexplore|discord|spotify|vlc|mpv|wmplayer|teams|ms-teams|whatsapp|telegram|slack|zoom|code|devenv|notepad|mspaint|photos|centro de control|nexodeck|electron|steamwebhelper|epicwebhelper|obs64|obs32|nvidia share|nvidia overlay|nvcontainer|radeonsoftware|gamebar|gamebarftserver|xboxpcapp|gamingservices|powershell|pwsh|windowsterminal|cmd|conhost)$/i;
 
 function resetFps() { fpsState.offset = 0; fpsState.header = null; fpsState.carry = ''; fpsState.apps.clear(); fpsState.rows = 0; fpsState.lastRowAt = 0; }
@@ -401,16 +401,23 @@ function ingestFps() {
   let fd;
   try {
     fd = fs.openSync(file, 'r');
+    fpsState.err = '';
     if (!fpsState.header) {
       const b = Buffer.alloc(8192);
       const n = fs.readSync(fd, b, 0, b.length, 0);
-      const first = b.toString('utf8', 0, n).split(/\r?\n/)[0];
-      if (!first || !first.includes(',')) return;
+      fpsState.firstBytes = b.slice(0, Math.min(n, 48)).toString('hex');
+      // decode() tolera UTF-8 con BOM y UTF-16; además se quitan caracteres nulos
+      const text = decode(b.slice(0, n)).replace(/\0/g, '').replace(/^\uFEFF/, '');
+      const first = text.split(/\r?\n/)[0];
+      fpsState.firstLine = first.slice(0, 160);
+      if (!first || !first.includes(',')) { fpsState.err = `cabecera no válida (leídos ${n} bytes)`; return; }
       const h = first.split(',').map((x) => x.trim().toLowerCase());
       // Según la versión, PresentMon llama al tiempo entre fotogramas "FrameTime" o "MsBetweenPresents".
       const iFt = h.indexOf('msbetweenpresents') >= 0 ? h.indexOf('msbetweenpresents') : h.indexOf('frametime');
       fpsState.header = { app: h.indexOf('application'), ft: iFt, cols: h.length };
-      const headEnd = Buffer.byteLength(first) + 2;
+      // Se busca el fin real de la primera línea en bytes (funciona con \n o \r\n)
+      const nl = b.indexOf(0x0a);
+      const headEnd = nl >= 0 ? nl + 1 : Buffer.byteLength(first) + 2;
       fpsState.offset = Math.max(headEnd, st.size - 300000); // solo lo más reciente
       fpsState.dropFirst = fpsState.offset > headEnd; // empezamos a mitad de una fila: se descarta el fragmento
       fpsState.carry = '';
@@ -438,7 +445,7 @@ function ingestFps() {
       a.last = now;
       if (Number.isFinite(ft) && ft > 0.2 && ft < 2000) a.frames.push({ t: now, ft });
     }
-  } catch {} finally { if (fd !== undefined) try { fs.closeSync(fd); } catch {} }
+  } catch (e) { fpsState.err = `${e.code || ''} ${e.message}`.trim(); } finally { if (fd !== undefined) try { fs.closeSync(fd); } catch {} }
   const now = Date.now();
   for (const [k, a] of fpsState.apps) {
     a.frames = a.frames.filter((f) => now - f.t < 10000);
@@ -522,6 +529,12 @@ const helperActive = () => {
   try { return Date.now() - fs.statSync(path.join(sensorDir(), 'heartbeat.txt')).mtimeMs < 7000; } catch { return false; }
 };
 
+function wmiFans() {
+  if (!helperActive()) return [];
+  const j = readJsonFile(path.join(sensorDir(), 'fans.json'));
+  return j && Array.isArray(j.fans) ? j.fans.filter((f) => f && Number.isFinite(f.rpm)).map((f) => ({ name: String(f.name), rpm: Math.round(f.rpm) })) : [];
+}
+
 ipcMain.handle('sys:state', async () => {
   // Si hace rato que no se mide (la pestaña estaba cerrada), la primera lectura promediaría todo ese tiempo
   // y saldría un valor sin sentido: se toma una referencia nueva y se mide una ventana corta.
@@ -552,7 +565,7 @@ ipcMain.handle('sys:state', async () => {
     cpu: { usage: cpu.usage, maxCore: cpu.maxCore, temp: cpuTemp, cores: os.cpus().length, model: (os.cpus()[0] || {}).model || '' },
     gpu,
     ram: { used: total - free, total },
-    fans: lhm ? lhm.fans : [],
+    fans: (lhm && lhm.fans.length) ? lhm.fans : wmiFans(),
     general,
     sensors: { lhm: !!lhm, helper, hasFiles: fs.existsSync(HELPER_PS1) },
     game,
@@ -609,6 +622,9 @@ ipcMain.handle('sys:diag', async () => {
   } catch { L.push('fps.csv: NO existe (PresentMon no ha escrito nada)'); }
   const hd = fpsState.header;
   L.push(hd ? `Columnas: ${hd.cols} · Application=#${hd.app} · tiempo de fotograma=#${hd.ft}${hd.app < 0 || hd.ft < 0 ? '  ← NO se encontró la columna' : ''}` : 'Cabecera del CSV: todavía no leída');
+  if (fpsState.err) L.push(`ERROR al leer fps.csv: ${fpsState.err}`);
+  if (fpsState.firstBytes) L.push(`Primeros bytes (hex): ${fpsState.firstBytes}`);
+  if (fpsState.firstLine) L.push(`Primera línea: ${fpsState.firstLine}`);
   L.push(`Filas leídas: ${fpsState.rows} · última fila hace ${ago(fpsState.lastRowAt)}`);
   const now = Date.now();
   const seen = [...fpsState.apps.entries()].map(([name, a]) => {
@@ -625,6 +641,10 @@ ipcMain.handle('sys:diag', async () => {
   L.push(`Juego elegido: ${g ? `${g.name} (${g.fps.toFixed(1)} FPS)` : 'ninguno'}`);
   L.push(`presentmon.err.log: ${readTail(path.join(dir, 'presentmon.err.log'), 300).replace(/\n/g, ' | ')}`);
   L.push(`presentmon.out.log: ${readTail(path.join(dir, 'presentmon.out.log'), 200).replace(/\n/g, ' | ')}`);
+
+  const fj = readJsonFile(path.join(dir, 'fans.json'));
+  L.push('', '── Ventiladores por WMI (Lenovo) ──');
+  L.push(fj ? `${fj.note}${fj.raw ? ' · respuesta: ' + fj.raw : ''} · detectados: ${(fj.fans || []).map((f) => `${f.name}=${f.rpm}`).join(', ') || 'ninguno'}` : 'fans.json: no existe todavía');
 
   L.push('', '── Sensores (LibreHardwareMonitor) ──');
   let sensors = lhmCache.sensors;
