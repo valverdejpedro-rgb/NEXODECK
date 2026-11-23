@@ -22,7 +22,7 @@
     "appId": "com.pedro.centrocontrol",
     "productName": "Centro de Control",
     "directories": { "buildResources": "build" },
-    "files": ["main.js", "preload.js", "index.html", "styles.css", "renderer.js", "assets/**/*"],
+    "files": ["main.js", "preload.js", "index.html", "styles.css", "renderer.js", "mixer.html", "mixer.js", "mixer.css", "assets/**/*"],
     "extraResources": [{ "from": "bin/svcl.exe", "to": "svcl.exe" }],
     "win": { "target": "nsis", "icon": "build/icon.png" },
     "nsis": {

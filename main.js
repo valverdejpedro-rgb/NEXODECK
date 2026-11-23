@@ -10,6 +10,8 @@ const LOGIN_ARGS = ['--hidden'];
 const startHidden = process.argv.includes('--hidden');
 
 let win = null;
+let mixerWin = null;
+let csvSeq = 0;
 let tray = null;
 let quitting = false;
 let settings = {};
@@ -67,14 +69,18 @@ function parseCsv(text) {
   return rows;
 }
 
-async function listDevices() {
-  const tmp = path.join(os.tmpdir(), `centro-control-${process.pid}.csv`);
+async function readItems() {
+  const tmp = path.join(os.tmpdir(), `centro-control-${process.pid}-${++csvSeq}.csv`);
   await svcl(['/scomma', tmp]);
   const buf = fs.readFileSync(tmp);
   try { fs.unlinkSync(tmp); } catch {}
   const rows = parseCsv(decode(buf));
-  if (!rows.length) throw new Error('svcl.exe no devolvió dispositivos');
+  if (!rows.length) throw new Error('svcl.exe no devolvió datos');
+  return rows;
+}
 
+async function listDevices() {
+  const rows = await readItems();
   const header = rows[0].map((h) => h.trim().toLowerCase());
   const col = (n) => header.indexOf(n);
   const iName = col('name'), iType = col('type'), iDir = col('direction'), iDef = col('default');
@@ -113,6 +119,70 @@ ipcMain.handle('audio:setVolume', (_, id, pct) => {
 });
 ipcMain.handle('audio:toggleMute', (_, id) => validId(id) && svcl(['/Switch', id]));
 ipcMain.handle('audio:setDefault', (_, id) => validId(id) && svcl(['/SetDefault', id, 'all']));
+
+/* ---------- Audio por aplicación ---------- */
+
+const iconCache = new Map();
+async function iconFor(p) {
+  if (!p) return '';
+  if (iconCache.has(p)) return iconCache.get(p);
+  let url = '';
+  try { url = (await app.getFileIcon(p, { size: 'normal' })).toDataURL(); } catch {}
+  iconCache.set(p, url);
+  return url;
+}
+
+// Una fila por aplicación (Chrome y similares abren varias sesiones de audio: se agrupan).
+async function listApps() {
+  const rows = await readItems();
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  const col = (n) => header.indexOf(n);
+  const iName = col('name'), iType = col('type'), iDir = col('direction'), iState = col('device state');
+  const iMute = col('muted'), iVol = col('volume percent'), iId = col('command-line friendly id');
+  const iPath = col('process path');
+  if (iName < 0 || iType < 0) throw new Error('Formato inesperado de svcl.exe');
+
+  const groups = new Map();
+  for (const r of rows.slice(1)) {
+    if (!/^application$/i.test((r[iType] || '').trim())) continue;
+    if (iDir >= 0 && !/render/i.test(r[iDir] || '')) continue;
+    const state = iState >= 0 ? (r[iState] || '').trim() : 'Active';
+    if (/expired/i.test(state)) continue;
+
+    const procPath = iPath >= 0 ? (r[iPath] || '').trim() : '';
+    const exe = procPath ? path.win32.basename(procPath) : '';
+    const name = (r[iName] || '').trim() || exe;
+    const target = exe || (iId >= 0 ? (r[iId] || '').trim() : '') || name;
+    if (!target) continue;
+
+    const key = target.toLowerCase();
+    const vol = parseFloat(((iVol >= 0 ? r[iVol] : '0') || '0').replace(',', '.')) || 0;
+    const muted = iMute >= 0 && /^(yes|sí|si|true)$/i.test((r[iMute] || '').trim());
+    const active = /^active$/i.test(state);
+    const g = groups.get(key);
+    if (!g) groups.set(key, { key, target, name, procPath, volume: vol, muted, active });
+    else {
+      g.volume = Math.max(g.volume, vol);
+      g.muted = g.muted && muted;
+      g.active = g.active || active;
+    }
+  }
+
+  const list = [...groups.values()].sort((a, b) => a.name.localeCompare(b.name, 'es', { sensitivity: 'base' }));
+  for (const a of list) a.icon = await iconFor(a.procPath);
+  return list.map(({ procPath, ...rest }) => rest);
+}
+
+const validTarget = (t) => typeof t === 'string' && t.length > 0 && t.length < 500 && !/^[/-]/.test(t);
+
+ipcMain.handle('apps:list', () => listApps());
+ipcMain.handle('apps:setVolume', (_, t, pct) => {
+  if (!validTarget(t)) return;
+  const v = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+  return svcl(['/SetVolume', t, String(v)]);
+});
+ipcMain.handle('apps:setMute', (_, t, muted) => validTarget(t) && svcl([muted ? '/Mute' : '/Unmute', t]));
+ipcMain.handle('ui:openMixer', () => openMixer());
 
 /* ---------- Ajustes guardados ---------- */
 
@@ -170,6 +240,7 @@ function createWindow() {
     else win.show();
   });
 
+  win.on('closed', () => { if (mixerWin && !mixerWin.isDestroyed()) mixerWin.close(); });
   win.on('focus', () => win.webContents.send('ui:shown'));
   win.on('restore', () => win.webContents.send('ui:shown'));
 
@@ -180,11 +251,50 @@ function createWindow() {
   });
 }
 
+function openMixer() {
+  if (mixerWin && !mixerWin.isDestroyed()) {
+    if (mixerWin.isMinimized()) mixerWin.restore();
+    mixerWin.show();
+    mixerWin.focus();
+    return;
+  }
+  const b = settings.mixerBounds || {};
+  mixerWin = new BrowserWindow({
+    width: b.width || 480,
+    height: b.height || 520,
+    x: b.x,
+    y: b.y,
+    minWidth: 380,
+    minHeight: 300,
+    show: false,
+    title: 'Mezclador de aplicaciones',
+    icon: path.join(__dirname, 'assets', 'icon.png'),
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  const w = mixerWin;
+  w.setMenuBarVisibility(false);
+  w.loadFile('mixer.html');
+  w.once('ready-to-show', () => w.show());
+  w.on('focus', () => w.webContents.send('ui:shown'));
+  w.on('restore', () => w.webContents.send('ui:shown'));
+  w.on('close', () => {
+    try { settings.mixerBounds = w.getNormalBounds(); saveSettings(); } catch {}
+  });
+  w.on('closed', () => { if (mixerWin === w) mixerWin = null; });
+}
+
 /* ---------- Bandeja ---------- */
 
 function buildMenu() {
   return Menu.buildFromTemplate([
     { label: 'Abrir Centro de Control', click: showWindow },
+    { label: 'Mezclador de aplicaciones', click: openMixer },
     { label: `Minimizar / traer al frente  (${SHORTCUT.replace('Control', 'Ctrl')})`, click: toggleWindow },
     { type: 'separator' },
     {

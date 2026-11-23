@@ -133,6 +133,8 @@ function renderUpdate(s) {
   }
 }
 
+document.getElementById('open-mixer').addEventListener('click', () => window.api.openMixer());
+
 window.api.onUpdate(renderUpdate);
 window.api.onShown(refresh);
 window.api.info().then((i) => {
