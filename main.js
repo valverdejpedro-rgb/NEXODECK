@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, globalShortcut, nativeImage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, globalShortcut, nativeImage, clipboard } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { execFile } = require('child_process');
 const path = require('path');
@@ -312,8 +312,8 @@ function sampleCpu() {
 // GPU NVIDIA (nvidia-smi viene con el controlador, no necesita permisos de administrador)
 let nvPath = null, nvMissingUntil = 0;
 const toNum = (s) => { const n = parseFloat(s); return Number.isFinite(n) ? n : null; };
-async function readGpu() {
-  if (Date.now() < nvMissingUntil) return null;
+async function readNvidia() {
+  if (Date.now() < nvMissingUntil) return [];
   const fields = 'name,utilization.gpu,temperature.gpu,memory.used,memory.total,fan.speed';
   const cands = nvPath ? [nvPath] : [
     'nvidia-smi',
@@ -324,15 +324,89 @@ async function readGpu() {
       const out = await new Promise((res, rej) => execFile(c,
         [`--query-gpu=${fields}`, '--format=csv,noheader,nounits'],
         { windowsHide: true, timeout: 3000 }, (e, so) => (e ? rej(e) : res(so))));
-      const line = String(out).split(/\r?\n/).find((l) => l.trim());
-      if (!line) continue;
+      const lines = String(out).split(/\r?\n/).filter((l) => l.trim());
+      if (!lines.length) continue;
       nvPath = c;
-      const p = line.split(',').map((x) => x.trim());
-      return { name: p[0], usage: toNum(p[1]), temp: toNum(p[2]), vramUsed: toNum(p[3]), vramTotal: toNum(p[4]), fan: toNum(p[5]) };
+      return lines.map((line) => {
+        const p = line.split(',').map((x) => x.trim());
+        return { vendor: 'nvidia', name: p[0], usage: toNum(p[1]), temp: toNum(p[2]), vramUsed: toNum(p[3]), vramTotal: toNum(p[4]), fan: toNum(p[5]), source: 'nvidia-smi' };
+      });
     } catch {}
   }
   nvMissingUntil = Date.now() + 60000;
-  return null;
+  return [];
+}
+
+// Nombres de todas las tarjetas gráficas según Windows (no necesita permisos). Sirve para que
+// aparezcan aunque todavía no estén activados los sensores avanzados.
+const vendorOf = (n) => (/nvidia|geforce|quadro/i.test(n) ? 'nvidia' : /amd|radeon|\bati\b/i.test(n) ? 'amd' : /intel/i.test(n) ? 'intel' : 'otra');
+let gpuNames = null, gpuNamesAt = 0, gpuNamesBusy = false;
+function refreshGpuNames() {
+  if (gpuNamesBusy || (gpuNames && Date.now() - gpuNamesAt < 300000)) return;
+  gpuNamesBusy = true;
+  execFile('powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }'],
+    { windowsHide: true, timeout: 10000 }, (err, so) => {
+      gpuNamesBusy = false;
+      gpuNamesAt = Date.now();
+      if (err) { gpuNames = gpuNames || []; return; }
+      gpuNames = String(so).split(/\r?\n/).map((x) => x.trim())
+        .filter((n) => n && !/basic render|remote|virtual|indirect|mirror|parsec|displaylink|meta/i.test(n));
+    });
+}
+
+// GPU leídas por LibreHardwareMonitor (AMD, Intel y también NVIDIA si no hay nvidia-smi)
+function gpusFromLhm(sensors) {
+  const groups = new Map();
+  for (const s of sensors) {
+    const m = s.id.match(/^\/(gpu-[a-z-]+)\/(\d+)\//i);
+    if (!m) continue;
+    const key = `${m[1].toLowerCase()}/${m[2]}`;
+    if (!groups.has(key)) groups.set(key, { kind: m[1].toLowerCase(), list: [], name: s.hw });
+    groups.get(key).list.push(s);
+  }
+  const out = [];
+  for (const g of groups.values()) {
+    const vendor = g.kind.includes('nvidia') ? 'nvidia' : g.kind.includes('amd') ? 'amd' : g.kind.includes('intel') ? 'intel' : 'otra';
+    const val = (type, re) => { const f = g.list.find((x) => x.type === type && x.value != null && re.test(x.name)); return f ? f.value : null; };
+    const loads = g.list.filter((x) => x.type === 'load' && x.value != null && !/memory|bus|power|video/i.test(x.name));
+    const temps = g.list.filter((x) => x.type === 'temperature' && x.value != null && x.value > 0 && x.value < 130 && !IGNORE_TEMP.test(x.name));
+    const usage = val('load', /^gpu core$/i) ?? val('load', /core/i) ?? val('load', /d3d 3d/i)
+      ?? (loads.length ? Math.max(...loads.map((x) => x.value)) : null);
+    const temp = val('temperature', /^gpu core$/i) ?? val('temperature', /hot ?spot/i)
+      ?? (temps.length ? Math.max(...temps.map((x) => x.value)) : null);
+    const vramUsed = val('smalldata', /gpu memory used/i) ?? val('smalldata', /d3d dedicated memory used/i);
+    const vramTotal = val('smalldata', /gpu memory total/i) ?? val('smalldata', /d3d dedicated memory total/i);
+    out.push({ vendor, name: g.name || '', usage, temp, vramUsed, vramTotal, fan: null, source: 'lhm' });
+  }
+  return out;
+}
+
+// Une todo: NVIDIA (nvidia-smi) + el resto (LibreHardwareMonitor) + las que Windows ve pero aún sin sensores.
+function buildGpus(nvidia, lhmSensors) {
+  const gpus = [...nvidia];
+  if (lhmSensors) {
+    for (const g of gpusFromLhm(lhmSensors)) {
+      if (g.vendor === 'nvidia' && nvidia.length) continue; // ya se leyó con nvidia-smi
+      gpus.push(g);
+    }
+  }
+  if (gpuNames) {
+    const have = {};
+    for (const g of gpus) have[g.vendor] = (have[g.vendor] || 0) + 1;
+    const seen = {};
+    for (const name of gpuNames) {
+      const v = vendorOf(name);
+      seen[v] = (seen[v] || 0) + 1;
+      if (seen[v] > (have[v] || 0)) gpus.push({ vendor: v, name, usage: null, temp: null, vramUsed: null, vramTotal: null, fan: null, source: 'windows' });
+    }
+  }
+  // Si LibreHardwareMonitor no trajo nombre, se toma el de Windows para ese fabricante
+  for (const g of gpus) {
+    if (!g.name && gpuNames) g.name = gpuNames.find((n) => vendorOf(n) === g.vendor) || '';
+  }
+  const rank = { nvidia: 0, amd: 1, intel: 2, otra: 3 };
+  return gpus.sort((a, b) => (rank[a.vendor] ?? 9) - (rank[b.vendor] ?? 9));
 }
 
 // LibreHardwareMonitor (si el ayudante está activo): temperatura de CPU, ventiladores, etc.
@@ -349,16 +423,18 @@ function parseLhmValue(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-function collectLhm(node, out) {
+function collectLhm(node, out, depth = 0, hw = '') {
   if (!node) return;
+  // Estructura de data.json: raíz > equipo > hardware > grupo (Temperaturas, Carga…) > sensor
+  if (depth === 2) hw = String(node.Text || '');
   if (node.SensorId) {
     const id = String(node.SensorId);
     const parts = id.split('/');
     // El id termina en /tipo/índice (el nombre del hardware puede tener más segmentos)
     const type = (parts.length >= 2 ? parts[parts.length - 2] : String(node.Type || '')).toLowerCase();
-    out.push({ id, type, name: String(node.Text || ''), value: parseLhmValue(node.Value) });
+    out.push({ id, type, name: String(node.Text || ''), value: parseLhmValue(node.Value), hw });
   }
-  for (const c of node.Children || []) collectLhm(c, out);
+  for (const c of node.Children || []) collectLhm(c, out, depth + 1, hw);
 }
 
 let lhmCache = { at: 0, sensors: null };
@@ -475,65 +551,9 @@ function currentGame() {
     const mean = recent.reduce((s, f) => s + f.ft, 0) / recent.length;
     const fps = 1000 / mean;
     if (fps < 5) continue;
-    if (!best || fps > best.fps) {
-      const sorted = a.frames.map((f) => f.ft).sort((x, y) => y - x);
-      const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * 0.01));
-      best = { app: name, name: base, fps, low1: 1000 / sorted[idx] };
-    }
+    if (!best || fps > best.fps) best = { app: name, name: base, fps };
   }
   return best;
-}
-
-// Picos durante la sesión de juego (para las recomendaciones)
-let gameSession = { app: '', peakGpu: 0, peakCpu: 0, lastSeen: 0 };
-function trackSession(game, gpuTemp, cpuTemp) {
-  const now = Date.now();
-  if (!game) { if (now - gameSession.lastSeen > 15000) gameSession = { app: '', peakGpu: 0, peakCpu: 0, lastSeen: 0 }; return; }
-  if (gameSession.app !== game.app) gameSession = { app: game.app, peakGpu: 0, peakCpu: 0, lastSeen: now };
-  gameSession.lastSeen = now;
-  if (gpuTemp != null) gameSession.peakGpu = Math.max(gameSession.peakGpu, gpuTemp);
-  if (cpuTemp != null) gameSession.peakCpu = Math.max(gameSession.peakCpu, cpuTemp);
-}
-
-const FPS_STEPS = [30, 40, 45, 50, 60, 75, 90, 100, 120, 144, 165, 240];
-const CAP_VALUES = [30, 60, 75, 90, 120, 144, 165, 240];
-
-// Estimación según la carga actual: si el equipo no está al límite, hay margen para más FPS.
-function estimateFps(game, gpu, cpu) {
-  const f = game.fps;
-  const g = gpu && gpu.usage != null ? gpu.usage : 0;
-  const c = cpu.maxCore;
-  const load = Math.max(g, c);
-  const limiter = gpu && gpu.usage != null && g >= c ? 'GPU' : 'CPU';
-  const nearCap = CAP_VALUES.some((v) => Math.abs(f - v) / v < 0.03);
-  const headroom = load < 85;
-  let potential = f;
-  if (headroom) potential = Math.min(f * 3, (f * 100) / Math.max(load, 30) * 0.95);
-  potential = Math.max(potential, f);
-
-  const ratio = Math.max(0.65, Math.min(1, game.low1 / f));
-  const stable = potential * ratio;
-  let recommended = null;
-  for (const s of FPS_STEPS) if (s <= stable * 0.92) recommended = s;
-  if (recommended == null) recommended = stable >= 20 ? Math.floor(stable / 5) * 5 : null;
-
-  const tips = [];
-  const peakG = gameSession.peakGpu, peakC = gameSession.peakCpu;
-  if (peakG >= 85) tips.push(`La GPU llegó a ${Math.round(peakG)} °C en esta sesión: limita los FPS a ${recommended || 60} o mejora la ventilación (base de enfriamiento, limpiar polvo).`);
-  if (peakC >= 90) tips.push(`El CPU llegó a ${Math.round(peakC)} °C: baja la carga (límite de FPS o perfil de energía más bajo).`);
-  if (gpu && gpu.vramTotal && gpu.vramUsed / gpu.vramTotal >= 0.92) tips.push(`VRAM casi llena (${(gpu.vramUsed / 1024).toFixed(1)} de ${(gpu.vramTotal / 1024).toFixed(1)} GB): baja la calidad de texturas para evitar tirones.`);
-  if (!headroom && limiter === 'GPU' && stable < 60) tips.push('La GPU va al límite: baja resolución o sombras/efectos' + (gpu && /rtx/i.test(gpu.name || '') ? ', o activa DLSS si el juego lo ofrece.' : ', o activa FSR si el juego lo ofrece.'));
-  if (!headroom && limiter === 'CPU') tips.push('Un núcleo del CPU va al límite: bajar gráficos ayuda poco; reduce distancia de dibujado, población o simulación.');
-  if (game.low1 / f < 0.6) tips.push('Hay tirones (los FPS mínimos son mucho menores que el promedio): fija un límite de FPS estable.');
-
-  return {
-    potential: Math.round(potential),
-    recommended,
-    limiter: headroom ? null : limiter,
-    capped: headroom && nearCap,
-    load: Math.round(load),
-    tips,
-  };
 }
 
 const helperActive = () => {
@@ -555,31 +575,32 @@ ipcMain.handle('sys:state', async () => {
     await new Promise((r) => setTimeout(r, 600));
   }
   const cpu = sampleCpu();
-  const [gpu, lhmSensors] = await Promise.all([readGpu(), readLhm()]);
+  refreshGpuNames();
+  const [nvidia, lhmSensors] = await Promise.all([readNvidia(), readLhm()]);
   lhmCache = { at: Date.now(), sensors: lhmSensors };
   const lhm = lhmSensors ? summarizeLhm(lhmSensors) : null;
+  const gpus = buildGpus(nvidia, lhmSensors);
   const helper = helperActive();
   const total = os.totalmem(), free = os.freemem();
 
   let game = null;
   if (helper) { ingestFps(); game = currentGame(); } else if (fpsState.apps.size) resetFps();
   const cpuTemp = lhm ? lhm.cpuTemp : null;
-  trackSession(game, gpu ? gpu.temp : null, cpuTemp);
-  if (game) game = { ...game, ...estimateFps(game, gpu, cpu), peakGpu: gameSession.peakGpu, peakCpu: gameSession.peakCpu };
 
-  let general = null;
-  if (lhm && lhm.general) general = lhm.general;
-  else if (gpu && gpu.temp != null) general = { value: gpu.temp, name: 'GPU' };
-  if (general && gpu && gpu.temp != null && gpu.temp > general.value) general = { value: gpu.temp, name: 'GPU' };
+  // Punto más caliente: el sensor de temperatura más alto de todo el equipo (no es un promedio)
+  let hottest = lhm && lhm.general ? lhm.general : null;
+  gpus.forEach((g, i) => {
+    if (g.temp != null && (!hottest || g.temp > hottest.value)) hottest = { value: g.temp, name: gpus.length > 1 ? `GPU ${i + 1}` : 'GPU' };
+  });
 
   return {
     cpu: { usage: cpu.usage, maxCore: cpu.maxCore, temp: cpuTemp, cores: os.cpus().length, model: (os.cpus()[0] || {}).model || '' },
-    gpu,
+    gpus,
     ram: { used: total - free, total },
     fans: (lhm && lhm.fans.length) ? lhm.fans : wmiFans(),
-    general,
+    general: hottest,
     sensors: { lhm: !!lhm, helper, hasFiles: fs.existsSync(HELPER_PS1) },
-    game,
+    game: game ? { name: game.name, fps: game.fps } : null,
   };
 });
 
@@ -607,7 +628,7 @@ function readJsonFile(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, '')); } catch { return null; }
 }
 
-ipcMain.handle('sys:diag', async () => {
+async function buildDiag() {
   const dir = sensorDir();
   const L = [];
   const ago = (ms) => (ms ? `${((Date.now() - ms) / 1000).toFixed(1)} s` : 'nunca');
@@ -676,7 +697,7 @@ ipcMain.handle('sys:diag', async () => {
     L.push(`Temperaturas: ${temps.map((x) => `${x.name}=${x.value}`).join(', ') || '(ninguna)'}`);
   }
   return L.join('\n');
-});
+}
 
 /* ---------- Ajustes guardados ---------- */
 
@@ -709,11 +730,11 @@ function toggleWindow() {
 function createWindow() {
   const b = settings.bounds || {};
   win = new BrowserWindow({
-    width: b.width || 520,
-    height: b.height || 620,
+    width: b.width || 960,
+    height: b.height || 640,
     x: b.x,
     y: b.y,
-    minWidth: 380,
+    minWidth: 360,
     minHeight: 360,
     show: false,
     title: 'Centro de Control',
@@ -764,6 +785,7 @@ function buildMenu() {
       click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked, args: LOGIN_ARGS }),
     },
     { label: 'Buscar actualizaciones', click: checkForUpdates },
+    { label: 'Copiar diagnóstico de sensores', click: async () => { try { clipboard.writeText(await buildDiag()); } catch {} } },
     { type: 'separator' },
     { label: `Versión ${app.getVersion()}`, enabled: false },
     { label: 'Salir', click: () => { quitting = true; app.quit(); } },

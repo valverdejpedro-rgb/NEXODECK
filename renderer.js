@@ -455,9 +455,22 @@ const sysBannerEl = document.getElementById('sys-banner');
 const sysBannerText = document.getElementById('sys-banner-text');
 const sysEnableBtn = document.getElementById('sys-enable');
 const sysGameEl = document.getElementById('sys-game');
+const sysAlertEl = document.getElementById('sys-alert');
+const sysAlertList = document.getElementById('sys-alert-list');
 const sysCards = {};
 let sysBusy = false;
 let sysEnabling = false;
+let sysOrder = '';
+
+/* Umbrales de color: [aviso (ámbar), crítico (rojo)]. Cámbialos aquí si quieres más o menos sensibilidad. */
+const LIMITS = {
+  usage: [70, 90],     // uso de CPU / GPU (%)
+  cpuTemp: [80, 90],   // °C
+  gpuTemp: [75, 85],   // °C
+  hottest: [80, 92],   // °C, sensor más caliente
+  ram: [75, 90],       // % de RAM usada
+  vram: [75, 92],      // % de VRAM usada
+};
 
 function mkStat(id, title) {
   const el = document.createElement('section');
@@ -470,6 +483,7 @@ function mkStat(id, title) {
   el.querySelector('.stat-title').textContent = title;
   sysCards[id] = {
     el,
+    title: el.querySelector('.stat-title'),
     sub: el.querySelector('.stat-sub'),
     row: el.querySelector('.stat-row'),
     big: el.querySelector('.big'),
@@ -479,21 +493,34 @@ function mkStat(id, title) {
     bar: el.querySelector('.bar i'),
     note: el.querySelector('.stat-note'),
   };
-  sysGridEl.appendChild(el);
+  if (id === 'fans') {
+    const c = sysCards.fans;
+    c.list = document.createElement('ul');
+    c.list.className = 'fan-list';
+    c.row.hidden = true;
+    c.barWrap.hidden = true;
+    c.el.insertBefore(c.list, c.note);
+  }
 }
-mkStat('cpu', 'CPU');
-mkStat('gpu', 'GPU');
-mkStat('vram', 'VRAM');
-mkStat('ram', 'RAM');
-mkStat('general', 'Temperatura general');
-mkStat('fans', 'Ventiladores');
-sysCards.fans.list = document.createElement('ul');
-sysCards.fans.list.className = 'fan-list';
-sysCards.fans.row.hidden = true;
-sysCards.fans.barWrap.hidden = true;
-sysCards.fans.el.insertBefore(sysCards.fans.list, sysCards.fans.note);
 
-const level = (v, warm, hot) => (v == null ? '' : v >= hot ? 'hot' : v >= warm ? 'warm' : '');
+// Crea las tarjetas que faltan, quita las que sobran y las coloca en orden (solo toca el DOM si cambió algo)
+function syncCards(ids, titles) {
+  for (const id of ids) {
+    if (!sysCards[id]) mkStat(id, titles[id]);
+    else if (sysCards[id].title.textContent !== titles[id]) sysCards[id].title.textContent = titles[id];
+  }
+  for (const id of Object.keys(sysCards)) {
+    if (!ids.includes(id)) { sysCards[id].el.remove(); delete sysCards[id]; }
+  }
+  const key = ids.join('|');
+  if (key !== sysOrder) {
+    sysOrder = key;
+    for (const id of ids) sysGridEl.appendChild(sysCards[id].el);
+  }
+}
+
+// ok / warm / hot según los umbrales
+const level = (v, lim) => (v == null ? '' : v >= lim[1] ? 'hot' : v >= lim[0] ? 'warm' : 'ok');
 const fmtT = (t) => (t == null ? '' : `${Math.round(t)} °C`);
 const gb = (mb) => (mb / 1024).toFixed(1);
 
@@ -507,25 +534,17 @@ function setStat(id, o) {
   c.barWrap.hidden = o.pct == null;
   if (o.pct != null) c.bar.style.width = Math.max(0, Math.min(100, o.pct)) + '%';
   c.el.dataset.level = o.level || '';
+  c.el.dataset.alert = o.alert || '';
   c.note.textContent = o.note || '';
   c.note.hidden = !o.note;
 }
 
+/* FPS del juego (solo FPS) */
 const GAME_TEMPLATE = `
   <div class="game-idle"></div>
   <div class="game-body" hidden>
     <div class="game-head"><span class="game-title"></span><span class="game-tag">Jugando</span></div>
-    <div class="game-fps">
-      <div><span class="big fps">–</span><span class="unit">FPS</span></div>
-      <div class="game-low"></div>
-    </div>
-    <div class="game-est">
-      <div class="est"><span class="est-lbl">Tu equipo podría llegar a</span><b class="est-val">–</b></div>
-      <div class="est"><span class="est-lbl">Lo recomendable</span><b class="est-rec">–</b></div>
-    </div>
-    <p class="game-note"></p>
-    <ul class="game-tips"></ul>
-    <p class="game-foot">Estimación según la carga actual de tu equipo con los ajustes que tienes ahora; no es una garantía.</p>
+    <div class="game-fps"><span class="big fps">–</span><span class="unit">FPS</span></div>
   </div>`;
 sysGameEl.innerHTML = GAME_TEMPLATE;
 const gm = {
@@ -533,11 +552,6 @@ const gm = {
   body: sysGameEl.querySelector('.game-body'),
   title: sysGameEl.querySelector('.game-title'),
   fps: sysGameEl.querySelector('.fps'),
-  low: sysGameEl.querySelector('.game-low'),
-  val: sysGameEl.querySelector('.est-val'),
-  rec: sysGameEl.querySelector('.est-rec'),
-  note: sysGameEl.querySelector('.game-note'),
-  tips: sysGameEl.querySelector('.game-tips'),
 };
 
 function renderGame(s) {
@@ -547,25 +561,11 @@ function renderGame(s) {
   gm.idle.hidden = !!g;
   gm.body.hidden = !g;
   if (!g) {
-    gm.idle.textContent = 'Sin juego detectado. Abre un juego y aquí verás sus FPS y cuánto más podría rendir tu equipo. Si ya lo tienes abierto, mira el Diagnóstico al final de esta pestaña.';
+    gm.idle.textContent = 'Sin juego detectado. Abre un juego y aquí verás sus FPS.';
     return;
   }
   gm.title.textContent = g.name;
   gm.fps.textContent = Math.round(g.fps);
-  gm.low.textContent = `1% más bajo: ${Math.round(g.low1)} FPS`;
-  gm.val.textContent = `~${g.potential} FPS`;
-  gm.rec.textContent = g.recommended ? `${g.recommended} FPS estables` : 'Baja los gráficos';
-  gm.note.textContent = g.capped
-    ? 'Tus FPS parecen limitados (V-Sync o límite del juego): el equipo tiene margen de sobra.'
-    : g.limiter
-      ? `Ya rindes al máximo: el límite es la ${g.limiter === 'GPU' ? 'GPU' : 'CPU'} (${g.load}% de uso).`
-      : 'Hay margen: el equipo no está al máximo con estos ajustes.';
-  gm.tips.replaceChildren(...g.tips.map((t) => {
-    const li = document.createElement('li');
-    li.textContent = t;
-    return li;
-  }));
-  gm.tips.hidden = !g.tips.length;
 }
 
 function renderBanner(s) {
@@ -579,54 +579,107 @@ function renderBanner(s) {
     sysBannerText.textContent = 'Iniciando sensores… la primera vez puede tardar unos segundos.';
     sysEnableBtn.hidden = true;
   } else {
-    if (!sysEnabling) sysBannerText.textContent = 'Para ver la temperatura del CPU, los ventiladores y los FPS en juegos hay que activar los sensores avanzados. Windows pedirá permiso de administrador.';
+    if (!sysEnabling) sysBannerText.textContent = 'Para ver la temperatura del CPU, las demás tarjetas gráficas, los ventiladores y los FPS en juegos hay que activar los sensores avanzados. Windows pedirá permiso de administrador.';
     sysEnableBtn.hidden = false;
     sysEnableBtn.disabled = sysEnabling;
   }
 }
 
+/* Aviso de "equipo exigido": solo aparece si algo está en rojo varias lecturas seguidas
+   y se quita tras varias lecturas normales, para que no parpadee. */
+const alertState = new Map(); // clave -> { msg, on, streak }
+function updateAlerts(found) {
+  const now = new Map(found.map((f) => [f.key, f.msg]));
+  for (const [key, msg] of now) {
+    const a = alertState.get(key) || { msg, on: false, streak: 0 };
+    a.msg = msg;
+    a.streak = a.streak > 0 ? a.streak + 1 : 1;
+    if (a.streak >= 3) a.on = true;
+    alertState.set(key, a);
+  }
+  for (const [key, a] of alertState) {
+    if (now.has(key)) continue;
+    a.streak = a.streak < 0 ? a.streak - 1 : -1;
+    if (a.streak <= -4) alertState.delete(key);
+  }
+  const active = [...alertState.values()].filter((a) => a.on);
+  sysAlertEl.hidden = !active.length;
+  sysAlertList.replaceChildren(...active.map((a) => { const li = document.createElement('li'); li.textContent = a.msg; return li; }));
+}
+
 function renderSystem(s) {
-  const { cpu, gpu, ram } = s;
+  const { cpu, gpus, ram } = s;
+  const alerts = [];
+  const multi = gpus.length > 1;
+
+  const ids = ['cpu'];
+  const titles = { cpu: 'CPU', ram: 'RAM', general: 'Punto más caliente', fans: 'Ventiladores' };
+  gpus.forEach((g, i) => {
+    ids.push(`gpu${i}`);
+    titles[`gpu${i}`] = multi ? `GPU ${i + 1}` : 'GPU';
+    if (g.vramTotal) { ids.push(`vram${i}`); titles[`vram${i}`] = multi ? `VRAM · GPU ${i + 1}` : 'VRAM'; }
+  });
+  ids.push('ram', 'general', 'fans');
+  if (!gpus.length) { ids.splice(1, 0, 'gpu0'); titles.gpu0 = 'GPU'; }
+  syncCards(ids, titles);
+
+  const cpuTempLv = level(cpu.temp, LIMITS.cpuTemp);
   setStat('cpu', {
     sub: `${cpu.cores} hilos`,
     big: Math.round(cpu.usage), unit: '%',
-    temp: fmtT(cpu.temp), tempLevel: level(cpu.temp, 80, 90),
-    pct: cpu.usage, level: level(cpu.usage, 70, 90),
+    temp: fmtT(cpu.temp), tempLevel: cpuTempLv, alert: cpuTempLv,
+    pct: cpu.usage, level: level(cpu.usage, LIMITS.usage),
     note: cpu.temp == null ? 'Temperatura: activa los sensores avanzados' : `Núcleo más cargado: ${Math.round(cpu.maxCore)}%`,
   });
+  if (cpuTempLv === 'hot') alerts.push({ key: 'cpu-temp', msg: `CPU a ${Math.round(cpu.temp)} °C: está muy caliente.` });
 
-  if (gpu) {
-    setStat('gpu', {
-      sub: (gpu.name || '').replace(/^NVIDIA\s+/i, '').replace(/GeForce\s+/i, ''),
-      big: gpu.usage == null ? null : Math.round(gpu.usage), unit: gpu.usage == null ? '' : '%',
-      temp: fmtT(gpu.temp), tempLevel: level(gpu.temp, 75, 85),
-      pct: gpu.usage, level: level(gpu.usage, 70, 90),
-    });
-    setStat('vram', gpu.vramTotal ? {
-      big: gb(gpu.vramUsed), unit: `/ ${gb(gpu.vramTotal)} GB`,
-      pct: (gpu.vramUsed / gpu.vramTotal) * 100, level: level((gpu.vramUsed / gpu.vramTotal) * 100, 75, 92),
-    } : { note: 'No disponible' });
-  } else {
-    setStat('gpu', { note: 'No se detectó una GPU NVIDIA (se necesita nvidia-smi del controlador).' });
-    setStat('vram', { note: 'No disponible' });
+  if (!gpus.length) {
+    setStat('gpu0', { note: 'No se detectó ninguna tarjeta gráfica.' });
   }
+  gpus.forEach((g, i) => {
+    const label = multi ? `GPU ${i + 1}` : 'GPU';
+    const hasData = g.usage != null || g.temp != null;
+    const tLv = level(g.temp, LIMITS.gpuTemp);
+    setStat(`gpu${i}`, {
+      sub: (g.name || '').replace(/^NVIDIA\s+/i, '').replace(/GeForce\s+/i, '').replace(/^AMD\s+/i, '').replace(/\s*\(TM\)/gi, ''),
+      big: g.usage == null ? null : Math.round(g.usage), unit: g.usage == null ? '' : '%',
+      temp: fmtT(g.temp), tempLevel: tLv, alert: tLv,
+      pct: g.usage, level: level(g.usage, LIMITS.usage),
+      note: hasData ? '' : 'Detectada. Activa los sensores avanzados para ver su uso y temperatura.',
+    });
+    if (tLv === 'hot') alerts.push({ key: `gpu-temp-${i}`, msg: `${label} a ${Math.round(g.temp)} °C: está muy caliente.` });
+    if (g.vramTotal) {
+      const pct = (g.vramUsed / g.vramTotal) * 100;
+      const lv = level(pct, LIMITS.vram);
+      setStat(`vram${i}`, {
+        big: gb(g.vramUsed), unit: `/ ${gb(g.vramTotal)} GB`,
+        pct, level: lv,
+      });
+      if (lv === 'hot') alerts.push({ key: `vram-${i}`, msg: `Memoria de video casi llena${multi ? ` (${label})` : ''}: ${Math.round(pct)}%.` });
+    }
+  });
 
+  const ramPct = (ram.used / ram.total) * 100;
+  const ramLv = level(ramPct, LIMITS.ram);
   setStat('ram', {
     sub: `${gb(ram.total / 1048576)} GB en total`,
     big: gb(ram.used / 1048576), unit: 'GB',
-    pct: (ram.used / ram.total) * 100, level: level((ram.used / ram.total) * 100, 75, 90),
+    pct: ramPct, level: ramLv,
   });
+  if (ramLv === 'hot') alerts.push({ key: 'ram', msg: `RAM casi llena: ${Math.round(ramPct)}% en uso.` });
 
+  const hotLv = s.general ? level(s.general.value, LIMITS.hottest) : '';
   setStat('general', s.general ? {
     sub: s.general.name,
     big: Math.round(s.general.value), unit: '°C',
-    level: level(s.general.value, 75, 88),
-    note: 'El sensor más caliente del equipo',
-  } : { note: 'Activa los sensores avanzados para ver la temperatura general' });
+    level: hotLv,
+    note: 'El sensor más caliente de todo el equipo (no es un promedio)',
+  } : { note: 'Activa los sensores avanzados para ver las temperaturas' });
+  if (hotLv === 'hot') alerts.push({ key: 'hottest', msg: `Un sensor llegó a ${Math.round(s.general.value)} °C (${s.general.name}).` });
 
   const fans = sysCards.fans;
   const rows = s.fans.map((f) => `${f.name}: ${f.rpm} RPM`);
-  if (gpu && gpu.fan != null) rows.push(`GPU: ${Math.round(gpu.fan)}%`);
+  gpus.forEach((g, i) => { if (g.fan != null) rows.push(`${multi ? `GPU ${i + 1}` : 'GPU'}: ${Math.round(g.fan)}%`); });
   fans.list.replaceChildren(...rows.map((t) => { const li = document.createElement('li'); li.textContent = t; return li; }));
   fans.list.hidden = !rows.length;
   fans.note.hidden = rows.length > 0;
@@ -634,6 +687,7 @@ function renderSystem(s) {
     ? 'Este equipo no expone la velocidad de sus ventiladores.'
     : 'Activa los sensores avanzados para ver los ventiladores';
 
+  updateAlerts(alerts);
   renderBanner(s);
   renderGame(s);
 }
@@ -662,30 +716,6 @@ sysEnableBtn.addEventListener('click', async () => {
   } else sysBannerText.textContent = 'Iniciando sensores… la primera vez puede tardar unos segundos.';
   setTimeout(refreshSystem, 1500);
 });
-
-/* Diagnóstico (se actualiza solo mientras el panel está abierto) */
-const diagEl = document.getElementById('sys-diag');
-const diagText = document.getElementById('sys-diag-text');
-const diagCopy = document.getElementById('sys-diag-copy');
-let diagBusy = false;
-async function refreshDiag() {
-  if (diagBusy || !diagEl.open) return;
-  diagBusy = true;
-  try { diagText.textContent = await window.api.getDiag(); }
-  catch { diagText.textContent = 'No se pudo leer el diagnóstico.'; }
-  finally { diagBusy = false; }
-}
-diagEl.addEventListener('toggle', refreshDiag);
-diagCopy.addEventListener('click', async () => {
-  try { await navigator.clipboard.writeText(diagText.textContent); diagCopy.textContent = 'Copiado ✓'; }
-  catch {
-    const r = document.createRange(); r.selectNodeContents(diagText);
-    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
-    diagCopy.textContent = 'Seleccionado: pulsa Ctrl+C';
-  }
-  setTimeout(() => { diagCopy.textContent = 'Copiar diagnóstico'; }, 2500);
-});
-setInterval(() => { if (!document.hidden && activeTab === 'system') refreshDiag(); }, 2000);
 
 setInterval(() => { if (!document.hidden && activeTab === 'system') refreshSystem(); }, 1000);
 
