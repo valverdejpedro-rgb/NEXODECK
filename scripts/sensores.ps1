@@ -87,6 +87,34 @@ $pmProc = $null
 $pmStart = Get-Date
 if (Test-Path $pmExe) { $pmProc = Start-OurPresentMon; $pmStart = Get-Date }
 
+# ---- Ventiladores por WMI de Lenovo (algunos portátiles lo exponen; LibreHardwareMonitor no lee su controlador) ----
+$fanFile = Join-Path $DataDir 'fans.json'
+$script:fanClass = $null
+$script:fanNote = 'sin probar'
+try {
+  $script:fanClass = Get-CimInstance -Namespace 'root\WMI' -ClassName 'LENOVO_FAN_METHOD' -ErrorAction Stop | Select-Object -First 1
+  $script:fanNote = if ($script:fanClass) { 'clase LENOVO_FAN_METHOD encontrada' } else { 'clase LENOVO_FAN_METHOD sin instancias' }
+} catch { $script:fanNote = 'clase LENOVO_FAN_METHOD no existe en este equipo' }
+Log "Ventiladores WMI: $($script:fanNote)"
+function Write-Fans {
+  if (-not $script:fanClass) {
+    try { (@{ note = $script:fanNote; fans = @() } | ConvertTo-Json -Compress) | Set-Content -Path $fanFile -Encoding UTF8 } catch {}
+    return
+  }
+  $list = @()
+  $raw = @()
+  foreach ($id in 1, 2) {
+    try {
+      $r = Invoke-CimMethod -InputObject $script:fanClass -MethodName 'Fan_GetCurrentFanSpeed' -Arguments @{ FanID = [uint32]$id } -ErrorAction Stop
+      $props = $r.PSObject.Properties | Where-Object { $_.Name -notmatch '^(ReturnValue|PSComputerName)$' -and $_.Value -is [ValueType] }
+      $raw += ("id{0}: " -f $id) + (($r.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ',')
+      $v = ($props | Select-Object -First 1).Value
+      if ($null -ne $v -and [double]$v -ge 0 -and [double]$v -lt 20000) { $list += @{ name = $(if ($id -eq 1) { 'Ventilador CPU' } else { 'Ventilador GPU' }); rpm = [int]$v } }
+    } catch { $raw += "id${id}: error $($_.Exception.Message)" }
+  }
+  try { (@{ note = $script:fanNote; raw = ($raw -join ' | '); fans = $list } | ConvertTo-Json -Compress -Depth 4) | Set-Content -Path $fanFile -Encoding UTF8 } catch {}
+}
+
 function Write-Status {
   $running = [bool]($pmProc -and -not $pmProc.HasExited)
   $st = [ordered]@{
@@ -123,6 +151,7 @@ try {
       }
     }
     Write-Status
+    Write-Fans
     Start-Sleep -Seconds 2
   }
 }
@@ -130,5 +159,5 @@ finally {
   Log 'Ayudante detenido'
   Stop-OurPresentMon
   if ($lhmProc -and -not $lhmProc.HasExited) { Stop-Process -Id $lhmProc.Id -Force -ErrorAction SilentlyContinue }
-  Remove-Item $beatFile, $pidFile, $csv, $statusFile -Force -ErrorAction SilentlyContinue
+  Remove-Item $beatFile, $pidFile, $csv, $statusFile, $fanFile -Force -ErrorAction SilentlyContinue
 }
