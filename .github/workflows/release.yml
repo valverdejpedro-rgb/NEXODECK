@@ -51,6 +51,26 @@ jobs:
             }
           }
 
+      - name: Conseguir PresentMon y LibreHardwareMonitor si faltan
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force bin | Out-Null
+          if (-not (Test-Path bin/PresentMon.exe)) {
+            try {
+              Invoke-WebRequest "https://github.com/GameTechDev/PresentMon/releases/download/v2.6.0/PresentMon-2.6.0-x64.exe" -OutFile bin/PresentMon.exe
+            } catch {
+              throw "No se pudo descargar PresentMon. Sube PresentMon.exe a la carpeta bin/ del repositorio."
+            }
+          }
+          if (-not (Test-Path bin/lhm/LibreHardwareMonitor.exe)) {
+            try {
+              Invoke-WebRequest "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/download/v0.9.6/LibreHardwareMonitor.zip" -OutFile lhm.zip
+              Expand-Archive lhm.zip -DestinationPath bin/lhm -Force
+            } catch {
+              throw "No se pudo descargar LibreHardwareMonitor. Descomprime su zip dentro de bin/lhm/ en el repositorio."
+            }
+          }
+
       - run: npm install
 
       - name: Construir y publicar
