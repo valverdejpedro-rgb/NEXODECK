@@ -388,10 +388,10 @@ function summarizeLhm(sensors) {
 }
 
 // FPS: PresentMon (ayudante) escribe un CSV; se lee de forma incremental.
-const fpsState = { offset: 0, size: 0, header: null, carry: '', apps: new Map(), rows: 0, lastRowAt: 0, err: '', firstBytes: '', firstLine: '' };
+const fpsState = { offset: 0, size: 0, header: null, carry: '', apps: new Map(), rows: 0, lastRowAt: 0, err: '', utf16: false, firstBytes: '', firstLine: '' };
 const NOT_GAMES = /^(dwm|explorer|searchhost|searchapp|startmenuexperiencehost|shellexperiencehost|textinputhost|applicationframehost|systemsettings|taskmgr|lockapp|widgets|chrome|msedge|msedgewebview2|firefox|brave|opera|vivaldi|iexplore|discord|spotify|vlc|mpv|wmplayer|teams|ms-teams|whatsapp|telegram|slack|zoom|code|devenv|notepad|mspaint|photos|centro de control|nexodeck|electron|steamwebhelper|epicwebhelper|obs64|obs32|nvidia share|nvidia overlay|nvcontainer|radeonsoftware|gamebar|gamebarftserver|xboxpcapp|gamingservices|powershell|pwsh|windowsterminal|cmd|conhost)$/i;
 
-function resetFps() { fpsState.offset = 0; fpsState.header = null; fpsState.carry = ''; fpsState.apps.clear(); fpsState.rows = 0; fpsState.lastRowAt = 0; }
+function resetFps() { fpsState.offset = 0; fpsState.header = null; fpsState.carry = ''; fpsState.apps.clear(); fpsState.rows = 0; fpsState.lastRowAt = 0; fpsState.utf16 = false; }
 
 function ingestFps() {
   const file = path.join(sensorDir(), 'fps.csv');
@@ -416,18 +416,29 @@ function ingestFps() {
       const iFt = h.indexOf('msbetweenpresents') >= 0 ? h.indexOf('msbetweenpresents') : h.indexOf('frametime');
       fpsState.header = { app: h.indexOf('application'), ft: iFt, cols: h.length };
       // Se busca el fin real de la primera línea en bytes (funciona con \n o \r\n)
-      const nl = b.indexOf(0x0a);
-      const headEnd = nl >= 0 ? nl + 1 : Buffer.byteLength(first) + 2;
+      // PowerShell guarda la salida de PresentMon en UTF-16 (empieza con FF FE): cada carácter ocupa 2 bytes.
+      fpsState.utf16 = n >= 2 && b[0] === 0xff && b[1] === 0xfe;
+      let headEnd = Buffer.byteLength(first) + 2;
+      if (fpsState.utf16) {
+        headEnd = n;
+        for (let i = 0; i + 1 < n; i += 2) if (b[i] === 0x0a && b[i + 1] === 0x00) { headEnd = i + 2; break; }
+      } else {
+        const nl = b.indexOf(0x0a);
+        if (nl >= 0) headEnd = nl + 1;
+      }
       fpsState.offset = Math.max(headEnd, st.size - 300000); // solo lo más reciente
+      if (fpsState.utf16 && fpsState.offset % 2) fpsState.offset--; // alineado a 2 bytes
       fpsState.dropFirst = fpsState.offset > headEnd; // empezamos a mitad de una fila: se descarta el fragmento
       fpsState.carry = '';
     }
     if (st.size <= fpsState.offset) return;
-    const len = st.size - fpsState.offset;
+    let len = st.size - fpsState.offset;
+    if (fpsState.utf16) len -= len % 2; // un carácter a medias se lee en la próxima vuelta
+    if (len <= 0) return;
     const buf = Buffer.alloc(len);
     fs.readSync(fd, buf, 0, len, fpsState.offset);
-    fpsState.offset = st.size;
-    const lines = (fpsState.carry + buf.toString('utf8')).split(/\r?\n/);
+    fpsState.offset += len;
+    const lines = (fpsState.carry + buf.toString(fpsState.utf16 ? 'utf16le' : 'utf8')).split(/\r?\n/);
     fpsState.carry = lines.pop();
     if (fpsState.dropFirst) { lines.shift(); fpsState.dropFirst = false; }
     const { app: ia, ft: ift } = fpsState.header;
