@@ -144,11 +144,19 @@ window.api.info().then((i) => {
 /* ---------- Pestañas ---------- */
 
 const tabBtns = [...document.querySelectorAll('.tab')];
-const tabPanels = { devices: document.getElementById('tab-devices'), apps: document.getElementById('tab-apps') };
+const tabPanels = {
+  devices: document.getElementById('tab-devices'),
+  apps: document.getElementById('tab-apps'),
+  power: document.getElementById('tab-power'),
+  system: document.getElementById('tab-system'),
+};
 let activeTab = 'devices';
 
 function refreshActive() {
-  return activeTab === 'apps' ? refreshApps() : refresh();
+  if (activeTab === 'apps') return refreshApps();
+  if (activeTab === 'power') return refreshPower();
+  if (activeTab === 'system') return refreshSystem();
+  return refresh();
 }
 
 function setTab(name) {
@@ -189,11 +197,16 @@ const APP_TEMPLATE = `
     <span class="app-name"></span>
     <span class="app-state"></span>
   </div>
-  <div class="head app-route">
+  <div class="head app-route app-out">
     <span class="lbl">Salida</span>
-    <select class="device"></select>
+    <select class="device dev-out"></select>
   </div>
-  <p class="app-hint" hidden>Cambio pendiente: la app lo aplicará cuando reinicie su audio (pausa y reproduce, o ábrela de nuevo).</p>
+  <p class="app-hint hint-out" hidden>Cambio pendiente: la app lo aplicará cuando reinicie su audio (pausa y reproduce, o ábrela de nuevo).</p>
+  <div class="head app-route app-in">
+    <span class="lbl">Entrada</span>
+    <select class="device dev-in"></select>
+  </div>
+  <p class="app-hint hint-in" hidden>Cambio pendiente: la app lo aplicará cuando vuelva a abrir el micrófono (cuelga y vuelve a llamar, o ábrela de nuevo).</p>
   <div class="control">
     <button class="mute" type="button" aria-pressed="false">
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -214,7 +227,14 @@ function paintApp(row, value) {
 async function actApps(fn) {
   appsBusy++;
   try { await fn(); } catch {} finally { appsBusy--; }
-  refreshApps();
+  setTimeout(refreshApps, 250);
+}
+
+function appStateText(a) {
+  if (a.muted) return 'Silenciada';
+  if (a.active) return 'Sonando';
+  if (a.micActive) return 'Usando el micrófono';
+  return 'En silencio';
 }
 
 function makeAppRow() {
@@ -226,14 +246,17 @@ function makeAppRow() {
     icon: el.querySelector('.app-icon'),
     name: el.querySelector('.app-name'),
     state: el.querySelector('.app-state'),
-    route: el.querySelector('.app-route'),
-    select: el.querySelector('select'),
-    hint: el.querySelector('.app-hint'),
+    outRoute: el.querySelector('.app-out'),
+    outSelect: el.querySelector('.dev-out'),
+    outHint: el.querySelector('.hint-out'),
+    inRoute: el.querySelector('.app-in'),
+    inSelect: el.querySelector('.dev-in'),
+    inHint: el.querySelector('.hint-in'),
     control: el.querySelector('.control'),
     mute: el.querySelector('.mute'),
     slider: el.querySelector('.slider'),
     pct: el.querySelector('.pct'),
-    target: '', muted: false, dragging: false, timer: null, sig: '',
+    target: '', muted: false, active: false, micActive: false, dragging: false, timer: null, sigOut: '', sigIn: '',
   };
 
   row.slider.addEventListener('pointerdown', () => { row.dragging = true; });
@@ -256,57 +279,75 @@ function makeAppRow() {
     clearTimeout(row.timer);
     row.timer = setTimeout(() => actApps(() => window.api.setAppVolume(row.target, v)), 80);
   }, { passive: false });
-  row.mute.addEventListener('click', () => actApps(() => window.api.setAppMute(row.target, !row.muted)));
-  row.select.addEventListener('change', () => actApps(() => window.api.setAppDevice(row.target, row.select.value)));
+  row.mute.addEventListener('click', () => {
+    const next = !row.muted;
+    row.muted = next;                       // se ve al instante, sin esperar a Windows
+    row.el.classList.toggle('muted', next);
+    row.mute.setAttribute('aria-pressed', String(next));
+    row.state.textContent = appStateText(row);
+    actApps(() => window.api.setAppMute(row.target, next));
+  });
+  row.outSelect.addEventListener('change', () => actApps(() => window.api.setAppDevice(row.target, row.outSelect.value, 'output')));
+  row.inSelect.addEventListener('change', () => actApps(() => window.api.setAppDevice(row.target, row.inSelect.value, 'input')));
   return row;
 }
 
-function updateAppRow(row, a, devices) {
+function fillDeviceSelect(select, devices) {
+  const first = document.createElement('option');
+  first.value = '';
+  first.textContent = 'Predeterminado del sistema';
+  select.replaceChildren(first, ...devices.map((d) => {
+    const o = document.createElement('option');
+    o.value = d.id;
+    o.textContent = d.name;
+    return o;
+  }));
+}
+
+function updateRoute(route, select, hint, info, show, devices, sigKey, row) {
+  route.hidden = !show;
+  hint.hidden = !(show && info && info.pending);
+  if (!show || !info) return;
+  const sig = devices.map((d) => d.id + '|' + d.name).join('\n');
+  if (row[sigKey] !== sig) { row[sigKey] = sig; fillDeviceSelect(select, devices); }
+  select.title = info.deviceRaw ? `Detectado: ${info.deviceRaw}` : '';
+  if (document.activeElement !== select) {
+    select.value = devices.some((d) => d.id === info.deviceId) ? info.deviceId : '';
+  }
+}
+
+function updateAppRow(row, a, devices, inputs) {
   row.target = a.target;
   row.muted = a.muted;
+  row.active = a.active;
+  row.micActive = a.micActive;
   row.name.textContent = a.name;
   row.name.title = a.target;
-  row.state.textContent = a.active ? 'Sonando' : 'En silencio';
-  row.el.classList.toggle('playing', a.active);
+  row.state.textContent = appStateText(a);
+  row.el.classList.toggle('playing', (a.active || a.micActive) && !a.muted);
   row.el.classList.toggle('muted', a.muted);
   row.mute.setAttribute('aria-pressed', String(a.muted));
   row.mute.setAttribute('aria-label', `Silenciar ${a.name}`);
   row.slider.setAttribute('aria-label', `Volumen de ${a.name}`);
-  row.select.setAttribute('aria-label', `Dispositivo de salida de ${a.name}`);
+  row.outSelect.setAttribute('aria-label', `Dispositivo de salida de ${a.name}`);
+  row.inSelect.setAttribute('aria-label', `Dispositivo de entrada de ${a.name}`);
 
   if (a.icon) {
     if (row.icon.src !== a.icon) row.icon.src = a.icon;
     row.icon.hidden = false;
   } else row.icon.hidden = true;
 
-  row.route.hidden = !a.canRoute;
-  row.hint.hidden = !(a.canRoute && a.pending);
+  updateRoute(row.outRoute, row.outSelect, row.outHint, a.out, a.canRoute && a.hasOut, devices, 'sigOut', row);
+  updateRoute(row.inRoute, row.inSelect, row.inHint, a.in, a.canRoute && a.hasIn, inputs, 'sigIn', row);
 
-  const sig = devices.map((d) => d.id + '|' + d.name).join('\n');
-  if (row.sig !== sig) {
-    row.sig = sig;
-    const first = document.createElement('option');
-    first.value = '';
-    first.textContent = 'Predeterminado del sistema';
-    row.select.replaceChildren(first, ...devices.map((d) => {
-      const o = document.createElement('option');
-      o.value = d.id;
-      o.textContent = d.name;
-      return o;
-    }));
-  }
-  row.select.title = a.deviceRaw ? `Detectado: ${a.deviceRaw}` : '';
-  if (document.activeElement !== row.select) {
-    row.select.value = devices.some((d) => d.id === a.deviceId) ? a.deviceId : '';
-  }
-
+  row.control.hidden = !a.hasOut; // una app que solo usa el micrófono no tiene volumen de salida
   if (!row.dragging) {
     row.slider.value = a.volume;
     paintApp(row, a.volume);
   }
 }
 
-function renderApps({ apps, devices }) {
+function renderApps({ apps, devices, inputs }) {
   const seen = new Set();
   for (const a of apps) {
     seen.add(a.key);
@@ -317,7 +358,7 @@ function renderApps({ apps, devices }) {
       appsListEl.appendChild(row.el);
       appsOrder = '';
     }
-    updateAppRow(row, a, devices);
+    updateAppRow(row, a, devices, inputs || []);
   }
   for (const [key, row] of appRows) {
     if (!seen.has(key)) { row.el.remove(); appRows.delete(key); appsOrder = ''; }
@@ -342,6 +383,287 @@ async function refreshApps() {
     appsErrorEl.textContent = 'No se pudo leer el audio de las aplicaciones. Revisa que svcl.exe esté incluido en la app.';
   }
 }
+
+/* ---------- Perfiles de energía ---------- */
+
+const powerListEl = document.getElementById('power-list');
+const powerCountEl = document.getElementById('power-count');
+const powerErrorEl = document.getElementById('power-error');
+let powerBusy = 0;
+let powerSig = '';
+
+function renderPower(plans) {
+  const sig = plans.map((p) => `${p.id}|${p.name}|${p.active}`).join('\n');
+  if (sig === powerSig) return;
+  powerSig = sig;
+  powerListEl.replaceChildren(...plans.map((p) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'plan' + (p.active ? ' active' : '');
+    b.setAttribute('aria-pressed', String(p.active));
+    b.dataset.id = p.id;
+    const dot = document.createElement('span');
+    dot.className = 'plan-dot';
+    const name = document.createElement('span');
+    name.className = 'plan-name';
+    name.textContent = p.name;
+    const badge = document.createElement('span');
+    badge.className = 'plan-badge';
+    badge.textContent = p.active ? 'Activo' : '';
+    b.append(dot, name, badge);
+    b.addEventListener('click', () => choosePlan(p.id));
+    return b;
+  }));
+  powerCountEl.textContent = plans.length === 1 ? '1 perfil de energía' : `${plans.length} perfiles de energía`;
+}
+
+async function choosePlan(id) {
+  for (const b of powerListEl.children) {
+    const on = b.dataset.id === id;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', String(on));
+    b.querySelector('.plan-badge').textContent = on ? 'Activo' : '';
+  }
+  powerBusy++;
+  try {
+    await window.api.setPower(id);
+    powerErrorEl.hidden = true;
+  } catch {
+    powerErrorEl.hidden = false;
+    powerErrorEl.textContent = 'No se pudo cambiar el perfil de energía.';
+  } finally { powerBusy--; }
+  powerSig = '';
+  refreshPower();
+}
+
+async function refreshPower() {
+  if (powerBusy) return;
+  try {
+    renderPower(await window.api.getPower());
+    powerErrorEl.hidden = true;
+  } catch {
+    powerErrorEl.hidden = false;
+    powerErrorEl.textContent = 'No se pudieron leer los perfiles de energía de Windows.';
+  }
+}
+
+/* ---------- Estado del sistema ---------- */
+
+const sysGridEl = document.getElementById('sys-grid');
+const sysErrorEl = document.getElementById('sys-error');
+const sysBannerEl = document.getElementById('sys-banner');
+const sysBannerText = document.getElementById('sys-banner-text');
+const sysEnableBtn = document.getElementById('sys-enable');
+const sysGameEl = document.getElementById('sys-game');
+const sysCards = {};
+let sysBusy = false;
+let sysEnabling = false;
+
+function mkStat(id, title) {
+  const el = document.createElement('section');
+  el.className = 'panel stat';
+  el.innerHTML = `
+    <div class="stat-head"><span class="stat-title"></span><span class="stat-sub"></span></div>
+    <div class="stat-row"><span class="big">–</span><span class="unit"></span><span class="temp"></span></div>
+    <div class="bar"><i></i></div>
+    <p class="stat-note"></p>`;
+  el.querySelector('.stat-title').textContent = title;
+  sysCards[id] = {
+    el,
+    sub: el.querySelector('.stat-sub'),
+    row: el.querySelector('.stat-row'),
+    big: el.querySelector('.big'),
+    unit: el.querySelector('.unit'),
+    temp: el.querySelector('.temp'),
+    barWrap: el.querySelector('.bar'),
+    bar: el.querySelector('.bar i'),
+    note: el.querySelector('.stat-note'),
+  };
+  sysGridEl.appendChild(el);
+}
+mkStat('cpu', 'CPU');
+mkStat('gpu', 'GPU');
+mkStat('vram', 'VRAM');
+mkStat('ram', 'RAM');
+mkStat('general', 'Temperatura general');
+mkStat('fans', 'Ventiladores');
+sysCards.fans.list = document.createElement('ul');
+sysCards.fans.list.className = 'fan-list';
+sysCards.fans.row.hidden = true;
+sysCards.fans.barWrap.hidden = true;
+sysCards.fans.el.insertBefore(sysCards.fans.list, sysCards.fans.note);
+
+const level = (v, warm, hot) => (v == null ? '' : v >= hot ? 'hot' : v >= warm ? 'warm' : '');
+const fmtT = (t) => (t == null ? '' : `${Math.round(t)} °C`);
+const gb = (mb) => (mb / 1024).toFixed(1);
+
+function setStat(id, o) {
+  const c = sysCards[id];
+  c.sub.textContent = o.sub || '';
+  c.big.textContent = o.big == null ? '–' : o.big;
+  c.unit.textContent = o.unit || '';
+  c.temp.textContent = o.temp || '';
+  c.temp.dataset.level = o.tempLevel || '';
+  c.barWrap.hidden = o.pct == null;
+  if (o.pct != null) c.bar.style.width = Math.max(0, Math.min(100, o.pct)) + '%';
+  c.el.dataset.level = o.level || '';
+  c.note.textContent = o.note || '';
+  c.note.hidden = !o.note;
+}
+
+const GAME_TEMPLATE = `
+  <div class="game-idle"></div>
+  <div class="game-body" hidden>
+    <div class="game-head"><span class="game-title"></span><span class="game-tag">Jugando</span></div>
+    <div class="game-fps">
+      <div><span class="big fps">–</span><span class="unit">FPS</span></div>
+      <div class="game-low"></div>
+    </div>
+    <div class="game-est">
+      <div class="est"><span class="est-lbl">Tu equipo podría llegar a</span><b class="est-val">–</b></div>
+      <div class="est"><span class="est-lbl">Lo recomendable</span><b class="est-rec">–</b></div>
+    </div>
+    <p class="game-note"></p>
+    <ul class="game-tips"></ul>
+    <p class="game-foot">Estimación según la carga actual de tu equipo con los ajustes que tienes ahora; no es una garantía.</p>
+  </div>`;
+sysGameEl.innerHTML = GAME_TEMPLATE;
+const gm = {
+  idle: sysGameEl.querySelector('.game-idle'),
+  body: sysGameEl.querySelector('.game-body'),
+  title: sysGameEl.querySelector('.game-title'),
+  fps: sysGameEl.querySelector('.fps'),
+  low: sysGameEl.querySelector('.game-low'),
+  val: sysGameEl.querySelector('.est-val'),
+  rec: sysGameEl.querySelector('.est-rec'),
+  note: sysGameEl.querySelector('.game-note'),
+  tips: sysGameEl.querySelector('.game-tips'),
+};
+
+function renderGame(s) {
+  if (!s.sensors.helper) { sysGameEl.hidden = true; return; }
+  sysGameEl.hidden = false;
+  const g = s.game;
+  gm.idle.hidden = !!g;
+  gm.body.hidden = !g;
+  if (!g) {
+    gm.idle.textContent = 'Sin juego detectado. Abre un juego y aquí verás sus FPS y cuánto más podría rendir tu equipo.';
+    return;
+  }
+  gm.title.textContent = g.name;
+  gm.fps.textContent = Math.round(g.fps);
+  gm.low.textContent = `1% más bajo: ${Math.round(g.low1)} FPS`;
+  gm.val.textContent = `~${g.potential} FPS`;
+  gm.rec.textContent = g.recommended ? `${g.recommended} FPS estables` : 'Baja los gráficos';
+  gm.note.textContent = g.capped
+    ? 'Tus FPS parecen limitados (V-Sync o límite del juego): el equipo tiene margen de sobra.'
+    : g.limiter
+      ? `Ya rindes al máximo: el límite es la ${g.limiter === 'GPU' ? 'GPU' : 'CPU'} (${g.load}% de uso).`
+      : 'Hay margen: el equipo no está al máximo con estos ajustes.';
+  gm.tips.replaceChildren(...g.tips.map((t) => {
+    const li = document.createElement('li');
+    li.textContent = t;
+    return li;
+  }));
+  gm.tips.hidden = !g.tips.length;
+}
+
+function renderBanner(s) {
+  const sn = s.sensors;
+  if (sn.helper && sn.lhm) { sysBannerEl.hidden = true; return; }
+  sysBannerEl.hidden = false;
+  if (!sn.hasFiles) {
+    sysBannerText.textContent = 'Faltan componentes de sensores en esta versión de la app.';
+    sysEnableBtn.hidden = true;
+  } else if (sn.helper) {
+    sysBannerText.textContent = 'Iniciando sensores… la primera vez puede tardar unos segundos.';
+    sysEnableBtn.hidden = true;
+  } else {
+    if (!sysEnabling) sysBannerText.textContent = 'Para ver la temperatura del CPU, los ventiladores y los FPS en juegos hay que activar los sensores avanzados. Windows pedirá permiso de administrador.';
+    sysEnableBtn.hidden = false;
+    sysEnableBtn.disabled = sysEnabling;
+  }
+}
+
+function renderSystem(s) {
+  const { cpu, gpu, ram } = s;
+  setStat('cpu', {
+    sub: `${cpu.cores} hilos`,
+    big: Math.round(cpu.usage), unit: '%',
+    temp: fmtT(cpu.temp), tempLevel: level(cpu.temp, 80, 90),
+    pct: cpu.usage, level: level(cpu.usage, 70, 90),
+    note: cpu.temp == null ? 'Temperatura: activa los sensores avanzados' : `Núcleo más cargado: ${Math.round(cpu.maxCore)}%`,
+  });
+
+  if (gpu) {
+    setStat('gpu', {
+      sub: (gpu.name || '').replace(/^NVIDIA\s+/i, '').replace(/GeForce\s+/i, ''),
+      big: gpu.usage == null ? null : Math.round(gpu.usage), unit: gpu.usage == null ? '' : '%',
+      temp: fmtT(gpu.temp), tempLevel: level(gpu.temp, 75, 85),
+      pct: gpu.usage, level: level(gpu.usage, 70, 90),
+    });
+    setStat('vram', gpu.vramTotal ? {
+      big: gb(gpu.vramUsed), unit: `/ ${gb(gpu.vramTotal)} GB`,
+      pct: (gpu.vramUsed / gpu.vramTotal) * 100, level: level((gpu.vramUsed / gpu.vramTotal) * 100, 75, 92),
+    } : { note: 'No disponible' });
+  } else {
+    setStat('gpu', { note: 'No se detectó una GPU NVIDIA (se necesita nvidia-smi del controlador).' });
+    setStat('vram', { note: 'No disponible' });
+  }
+
+  setStat('ram', {
+    sub: `${gb(ram.total / 1048576)} GB en total`,
+    big: gb(ram.used / 1048576), unit: 'GB',
+    pct: (ram.used / ram.total) * 100, level: level((ram.used / ram.total) * 100, 75, 90),
+  });
+
+  setStat('general', s.general ? {
+    sub: s.general.name,
+    big: Math.round(s.general.value), unit: '°C',
+    level: level(s.general.value, 75, 88),
+    note: 'El sensor más caliente del equipo',
+  } : { note: 'Activa los sensores avanzados para ver la temperatura general' });
+
+  const fans = sysCards.fans;
+  const rows = s.fans.map((f) => `${f.name}: ${f.rpm} RPM`);
+  if (gpu && gpu.fan != null) rows.push(`GPU: ${Math.round(gpu.fan)}%`);
+  fans.list.replaceChildren(...rows.map((t) => { const li = document.createElement('li'); li.textContent = t; return li; }));
+  fans.list.hidden = !rows.length;
+  fans.note.hidden = rows.length > 0;
+  fans.note.textContent = s.sensors.lhm
+    ? 'Este equipo no expone la velocidad de sus ventiladores.'
+    : 'Activa los sensores avanzados para ver los ventiladores';
+
+  renderBanner(s);
+  renderGame(s);
+}
+
+async function refreshSystem() {
+  if (sysBusy) return;
+  sysBusy = true;
+  try {
+    renderSystem(await window.api.getSystem());
+    sysErrorEl.hidden = true;
+  } catch {
+    sysErrorEl.hidden = false;
+    sysErrorEl.textContent = 'No se pudo leer el estado del sistema.';
+  } finally { sysBusy = false; }
+}
+
+sysEnableBtn.addEventListener('click', async () => {
+  sysEnabling = true;
+  sysEnableBtn.disabled = true;
+  sysBannerText.textContent = 'Esperando el permiso de administrador de Windows…';
+  const res = await window.api.enableSensors().catch(() => ({ ok: false, error: 'No se pudo activar.' }));
+  sysEnabling = false;
+  if (!res.ok) {
+    sysBannerText.textContent = res.error || 'No se pudo activar.';
+    sysEnableBtn.disabled = false;
+  } else sysBannerText.textContent = 'Iniciando sensores… la primera vez puede tardar unos segundos.';
+  setTimeout(refreshSystem, 1500);
+});
+
+setInterval(() => { if (!document.hidden && activeTab === 'system') refreshSystem(); }, 1000);
 
 refresh();
 setInterval(() => { if (!document.hidden) refreshActive(); }, 2000);

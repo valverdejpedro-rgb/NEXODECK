@@ -1,7 +1,7 @@
 {
   "name": "centro-control-pc",
   "productName": "Centro de Control",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "description": "Centro de control de PC: volumen y dispositivos de audio desde una barra",
   "main": "main.js",
   "author": "Pedro",
@@ -23,7 +23,12 @@
     "productName": "Centro de Control",
     "directories": { "buildResources": "build" },
     "files": ["main.js", "preload.js", "index.html", "styles.css", "renderer.js", "mixer.html", "mixer.js", "mixer.css", "assets/**/*"],
-    "extraResources": [{ "from": "bin/svcl.exe", "to": "svcl.exe" }],
+    "extraResources": [
+      { "from": "bin/svcl.exe", "to": "svcl.exe" },
+      { "from": "bin/PresentMon.exe", "to": "PresentMon.exe" },
+      { "from": "bin/lhm", "to": "lhm" },
+      { "from": "scripts/sensores.ps1", "to": "sensores.ps1" }
+    ],
     "win": { "target": "nsis", "icon": "build/icon.png" },
     "nsis": {
       "oneClick": true,
