@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('api', {
   setPower: (id) => ipcRenderer.invoke('power:set', id),
   getSystem: () => ipcRenderer.invoke('sys:state'),
   enableSensors: () => ipcRenderer.invoke('sys:enable'),
+  getDiag: () => ipcRenderer.invoke('sys:diag'),
   info: () => ipcRenderer.invoke('app:info'),
   checkUpdates: () => ipcRenderer.invoke('update:check'),
   installUpdate: () => ipcRenderer.invoke('update:install'),

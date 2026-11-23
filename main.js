@@ -361,6 +361,7 @@ function collectLhm(node, out) {
   for (const c of node.Children || []) collectLhm(c, out);
 }
 
+let lhmCache = { at: 0, sensors: null };
 async function readLhm() {
   try {
     const res = await fetch(LHM_URL, { signal: AbortSignal.timeout(900) });
@@ -387,10 +388,10 @@ function summarizeLhm(sensors) {
 }
 
 // FPS: PresentMon (ayudante) escribe un CSV; se lee de forma incremental.
-const fpsState = { offset: 0, size: 0, header: null, carry: '', apps: new Map() };
+const fpsState = { offset: 0, size: 0, header: null, carry: '', apps: new Map(), rows: 0, lastRowAt: 0 };
 const NOT_GAMES = /^(dwm|explorer|searchhost|searchapp|startmenuexperiencehost|shellexperiencehost|textinputhost|applicationframehost|systemsettings|taskmgr|lockapp|widgets|chrome|msedge|msedgewebview2|firefox|brave|opera|vivaldi|iexplore|discord|spotify|vlc|mpv|wmplayer|teams|ms-teams|whatsapp|telegram|slack|zoom|code|devenv|notepad|mspaint|photos|centro de control|nexodeck|electron|steamwebhelper|epicwebhelper|obs64|obs32|nvidia share|nvidia overlay|nvcontainer|radeonsoftware|gamebar|gamebarftserver|xboxpcapp|gamingservices|powershell|pwsh|windowsterminal|cmd|conhost)$/i;
 
-function resetFps() { fpsState.offset = 0; fpsState.header = null; fpsState.carry = ''; fpsState.apps.clear(); }
+function resetFps() { fpsState.offset = 0; fpsState.header = null; fpsState.carry = ''; fpsState.apps.clear(); fpsState.rows = 0; fpsState.lastRowAt = 0; }
 
 function ingestFps() {
   const file = path.join(sensorDir(), 'fps.csv');
@@ -406,8 +407,12 @@ function ingestFps() {
       const first = b.toString('utf8', 0, n).split(/\r?\n/)[0];
       if (!first || !first.includes(',')) return;
       const h = first.split(',').map((x) => x.trim().toLowerCase());
-      fpsState.header = { app: h.indexOf('application'), ft: Math.max(h.indexOf('frametime'), h.indexOf('msbetweenpresents')) };
-      fpsState.offset = Math.max(Buffer.byteLength(first) + 2, st.size - 300000); // solo lo más reciente
+      // Según la versión, PresentMon llama al tiempo entre fotogramas "FrameTime" o "MsBetweenPresents".
+      const iFt = h.indexOf('msbetweenpresents') >= 0 ? h.indexOf('msbetweenpresents') : h.indexOf('frametime');
+      fpsState.header = { app: h.indexOf('application'), ft: iFt, cols: h.length };
+      const headEnd = Buffer.byteLength(first) + 2;
+      fpsState.offset = Math.max(headEnd, st.size - 300000); // solo lo más reciente
+      fpsState.dropFirst = fpsState.offset > headEnd; // empezamos a mitad de una fila: se descarta el fragmento
       fpsState.carry = '';
     }
     if (st.size <= fpsState.offset) return;
@@ -417,6 +422,7 @@ function ingestFps() {
     fpsState.offset = st.size;
     const lines = (fpsState.carry + buf.toString('utf8')).split(/\r?\n/);
     fpsState.carry = lines.pop();
+    if (fpsState.dropFirst) { lines.shift(); fpsState.dropFirst = false; }
     const { app: ia, ft: ift } = fpsState.header;
     if (ia < 0) return;
     const now = Date.now();
@@ -425,6 +431,7 @@ function ingestFps() {
       const c = line.split(',');
       const name = (c[ia] || '').trim();
       if (!name) continue;
+      fpsState.rows++; fpsState.lastRowAt = now;
       const ft = ift >= 0 ? parseFloat(c[ift]) : NaN;
       let a = fpsState.apps.get(name);
       if (!a) { a = { frames: [], last: 0 }; fpsState.apps.set(name, a); }
@@ -516,8 +523,16 @@ const helperActive = () => {
 };
 
 ipcMain.handle('sys:state', async () => {
+  // Si hace rato que no se mide (la pestaña estaba cerrada), la primera lectura promediaría todo ese tiempo
+  // y saldría un valor sin sentido: se toma una referencia nueva y se mide una ventana corta.
+  if (Date.now() - cpuLastAt > 3000) {
+    cpuPrev = os.cpus().map((c) => ({ ...c.times }));
+    cpuLastAt = Date.now() - 400;
+    await new Promise((r) => setTimeout(r, 600));
+  }
   const cpu = sampleCpu();
   const [gpu, lhmSensors] = await Promise.all([readGpu(), readLhm()]);
+  lhmCache = { at: Date.now(), sensors: lhmSensors };
   const lhm = lhmSensors ? summarizeLhm(lhmSensors) : null;
   const helper = helperActive();
   const total = os.totalmem(), free = os.freemem();
@@ -554,6 +569,83 @@ ipcMain.handle('sys:enable', () => new Promise((resolve) => {
   execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { windowsHide: true, timeout: 90000 },
     (err) => resolve(err ? { ok: false, error: 'No se concedió el permiso de administrador.' } : { ok: true }));
 }));
+
+// Diagnóstico: resume en texto qué ve cada parte (ayudante, PresentMon, LibreHardwareMonitor) para poder encontrar fallos.
+function readTail(file, max = 500) {
+  try {
+    const buf = fs.readFileSync(file);
+    if (!buf.length) return '(vacío)';
+    const t = decode(buf).replace(/\r/g, '').trim();
+    return t.length > max ? '…' + t.slice(-max) : t;
+  } catch { return '(no existe)'; }
+}
+function readJsonFile(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, '')); } catch { return null; }
+}
+
+ipcMain.handle('sys:diag', async () => {
+  const dir = sensorDir();
+  const L = [];
+  const ago = (ms) => (ms ? `${((Date.now() - ms) / 1000).toFixed(1)} s` : 'nunca');
+  L.push(`Centro de Control ${app.getVersion()} · ${app.isPackaged ? 'instalada' : 'modo desarrollo'}`);
+  L.push(`Archivos de la app: sensores.ps1 ${fs.existsSync(HELPER_PS1) ? 'sí' : 'NO'} · PresentMon.exe ${fs.existsSync(path.join(RES_DIR, 'PresentMon.exe')) ? 'sí' : 'NO'} · lhm/LibreHardwareMonitor.exe ${fs.existsSync(path.join(RES_DIR, 'lhm', 'LibreHardwareMonitor.exe')) ? 'sí' : 'NO'}`);
+
+  L.push('', '── Ayudante (administrador) ──');
+  let beat = 0;
+  try { beat = fs.statSync(path.join(dir, 'heartbeat.txt')).mtimeMs; } catch {}
+  L.push(`Latido: ${beat ? 'hace ' + ago(beat) : 'no hay (el ayudante no está corriendo)'}`);
+  const st = readJsonFile(path.join(dir, 'status.json'));
+  if (st) {
+    L.push(`PresentMon: ${st.pmRunning ? 'CORRIENDO' : 'DETENIDO'}${st.pmExitCode != null ? ` (último código de salida ${st.pmExitCode})` : ''} · reinicios: ${st.pmRestarts}`);
+    L.push(`LibreHardwareMonitor: ${st.lhmRunning ? 'CORRIENDO' : 'DETENIDO'}`);
+  } else L.push('status.json: no existe todavía');
+  L.push(`helper.log: ${readTail(path.join(dir, 'helper.log'), 400).replace(/\n/g, ' | ')}`);
+
+  L.push('', '── FPS (PresentMon) ──');
+  const csv = path.join(dir, 'fps.csv');
+  try {
+    const cs = fs.statSync(csv);
+    L.push(`fps.csv: ${(cs.size / 1024).toFixed(0)} KB, modificado hace ${ago(cs.mtimeMs)}`);
+  } catch { L.push('fps.csv: NO existe (PresentMon no ha escrito nada)'); }
+  const hd = fpsState.header;
+  L.push(hd ? `Columnas: ${hd.cols} · Application=#${hd.app} · tiempo de fotograma=#${hd.ft}${hd.app < 0 || hd.ft < 0 ? '  ← NO se encontró la columna' : ''}` : 'Cabecera del CSV: todavía no leída');
+  L.push(`Filas leídas: ${fpsState.rows} · última fila hace ${ago(fpsState.lastRowAt)}`);
+  const now = Date.now();
+  const seen = [...fpsState.apps.entries()].map(([name, a]) => {
+    const recent = a.frames.filter((f) => now - f.t < 3000);
+    const mean = recent.length ? recent.reduce((x, f) => x + f.ft, 0) / recent.length : 0;
+    return { name, n: a.frames.length, fps: mean ? 1000 / mean : 0, ignored: NOT_GAMES.test(name.replace(/\.exe$/i, '')) };
+  }).sort((a, b) => b.n - a.n);
+  if (!seen.length) L.push('Programas que presentan fotogramas: ninguno');
+  else {
+    L.push('Programas que presentan fotogramas (últimos 10 s):');
+    for (const a of seen.slice(0, 8)) L.push(`  · ${a.name} — ${a.n} fotogramas — ${a.fps ? a.fps.toFixed(1) + ' FPS' : 'sin datos de 3 s'}${a.ignored ? ' — IGNORADO por la lista de no-juegos' : ''}`);
+  }
+  const g = currentGame();
+  L.push(`Juego elegido: ${g ? `${g.name} (${g.fps.toFixed(1)} FPS)` : 'ninguno'}`);
+  L.push(`presentmon.err.log: ${readTail(path.join(dir, 'presentmon.err.log'), 300).replace(/\n/g, ' | ')}`);
+  L.push(`presentmon.out.log: ${readTail(path.join(dir, 'presentmon.out.log'), 200).replace(/\n/g, ' | ')}`);
+
+  L.push('', '── Sensores (LibreHardwareMonitor) ──');
+  let sensors = lhmCache.sensors;
+  if (!sensors || Date.now() - lhmCache.at > 5000) sensors = await readLhm();
+  if (!sensors) L.push(`No responde en ${LHM_URL} (no está abierto, o el servidor web no arrancó)`);
+  else {
+    const byType = {};
+    const hw = new Set();
+    for (const x of sensors) {
+      byType[x.type] = (byType[x.type] || 0) + 1;
+      hw.add(x.id.split('/').slice(0, -2).join('/'));
+    }
+    L.push(`Responde: ${sensors.length} sensores → ${Object.entries(byType).map(([k, v]) => `${k} ${v}`).join(', ')}`);
+    L.push(`Hardware que ve: ${[...hw].join('  ') || '(nada)'}`);
+    const fans = sensors.filter((x) => x.type === 'fan');
+    L.push(fans.length ? `Ventiladores: ${fans.map((x) => `${x.name}=${x.value}`).join(', ')}` : 'Ventiladores: LibreHardwareMonitor no encontró ninguno');
+    const temps = sensors.filter((x) => x.type === 'temperature' && x.value != null).slice(0, 12);
+    L.push(`Temperaturas: ${temps.map((x) => `${x.name}=${x.value}`).join(', ') || '(ninguna)'}`);
+  }
+  return L.join('\n');
+});
 
 /* ---------- Ajustes guardados ---------- */
 

@@ -231,3 +231,7 @@ footer button:focus-visible { outline: 2px solid var(--accent); outline-offset: 
 .game-note { font-size: 13px; }
 .game-tips { padding-left: 18px; display: grid; gap: 4px; font-size: 13px; }
 .game-foot { color: var(--muted); font-size: 11px; }
+.diag { display: grid; gap: 8px; }
+.diag summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+.diag[open] summary { margin-bottom: 8px; }
+.diag pre { white-space: pre-wrap; word-break: break-word; font: 11px/1.45 Consolas, "Cascadia Mono", monospace; color: var(--muted); user-select: text; max-height: 340px; overflow: auto; }

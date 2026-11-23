@@ -547,7 +547,7 @@ function renderGame(s) {
   gm.idle.hidden = !!g;
   gm.body.hidden = !g;
   if (!g) {
-    gm.idle.textContent = 'Sin juego detectado. Abre un juego y aquí verás sus FPS y cuánto más podría rendir tu equipo.';
+    gm.idle.textContent = 'Sin juego detectado. Abre un juego y aquí verás sus FPS y cuánto más podría rendir tu equipo. Si ya lo tienes abierto, mira el Diagnóstico al final de esta pestaña.';
     return;
   }
   gm.title.textContent = g.name;
@@ -662,6 +662,30 @@ sysEnableBtn.addEventListener('click', async () => {
   } else sysBannerText.textContent = 'Iniciando sensores… la primera vez puede tardar unos segundos.';
   setTimeout(refreshSystem, 1500);
 });
+
+/* Diagnóstico (se actualiza solo mientras el panel está abierto) */
+const diagEl = document.getElementById('sys-diag');
+const diagText = document.getElementById('sys-diag-text');
+const diagCopy = document.getElementById('sys-diag-copy');
+let diagBusy = false;
+async function refreshDiag() {
+  if (diagBusy || !diagEl.open) return;
+  diagBusy = true;
+  try { diagText.textContent = await window.api.getDiag(); }
+  catch { diagText.textContent = 'No se pudo leer el diagnóstico.'; }
+  finally { diagBusy = false; }
+}
+diagEl.addEventListener('toggle', refreshDiag);
+diagCopy.addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(diagText.textContent); diagCopy.textContent = 'Copiado ✓'; }
+  catch {
+    const r = document.createRange(); r.selectNodeContents(diagText);
+    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    diagCopy.textContent = 'Seleccionado: pulsa Ctrl+C';
+  }
+  setTimeout(() => { diagCopy.textContent = 'Copiar diagnóstico'; }, 2500);
+});
+setInterval(() => { if (!document.hidden && activeTab === 'system') refreshDiag(); }, 2000);
 
 setInterval(() => { if (!document.hidden && activeTab === 'system') refreshSystem(); }, 1000);
 
