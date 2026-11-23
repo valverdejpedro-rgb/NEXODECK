@@ -1,6 +1,8 @@
 # Ayudante de sensores avanzados (se ejecuta como administrador).
 # Arranca LibreHardwareMonitor (temperaturas y ventiladores) y PresentMon (FPS),
 # y se cierra solo cuando se cierra Centro de Control.
+# Deja registros en la carpeta de datos (helper.log, status.json, presentmon.*.log)
+# que la app muestra en su panel de Diagnóstico.
 param(
   [int]$ParentPid = 0,
   [string]$ResDir = '',
@@ -10,9 +12,19 @@ $ErrorActionPreference = 'SilentlyContinue'
 if (-not $DataDir) { exit 1 }
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 
-$pidFile  = Join-Path $DataDir 'helper.pid'
-$beatFile = Join-Path $DataDir 'heartbeat.txt'
-$csv      = Join-Path $DataDir 'fps.csv'
+$pidFile    = Join-Path $DataDir 'helper.pid'
+$beatFile   = Join-Path $DataDir 'heartbeat.txt'
+$csv        = Join-Path $DataDir 'fps.csv'
+$logFile    = Join-Path $DataDir 'helper.log'
+$statusFile = Join-Path $DataDir 'status.json'
+$pmOutLog   = Join-Path $DataDir 'presentmon.out.log'
+$pmErrLog   = Join-Path $DataDir 'presentmon.err.log'
+
+function Log($msg) {
+  try { ('{0} {1}' -f (Get-Date).ToString('s'), $msg) | Add-Content -Path $logFile -Encoding UTF8 } catch {}
+}
+# Que el registro no crezca sin límite
+if ((Test-Path $logFile) -and ((Get-Item $logFile).Length -gt 200000)) { Remove-Item $logFile -Force }
 
 # Evitar dos ayudantes a la vez
 if (Test-Path $pidFile) {
@@ -23,10 +35,12 @@ if (Test-Path $pidFile) {
   }
 }
 $PID | Set-Content $pidFile
+Log "Ayudante iniciado (PID $PID, app PID $ParentPid)"
 
 $lhmDir = Join-Path $ResDir 'lhm'
 $lhmExe = Join-Path $lhmDir 'LibreHardwareMonitor.exe'
 $pmExe  = Join-Path $ResDir 'PresentMon.exe'
+Log "PresentMon.exe existe: $(Test-Path $pmExe) | LibreHardwareMonitor.exe existe: $(Test-Path $lhmExe)"
 
 # ---- LibreHardwareMonitor (servidor web local en 127.0.0.1:8085) ----
 $lhmProc = $null
@@ -45,6 +59,9 @@ if ((Test-Path $lhmExe) -and -not (Get-Process -Name 'LibreHardwareMonitor' -Err
 </configuration>
 '@ | Set-Content -Path $cfg -Encoding UTF8
   $lhmProc = Start-Process -FilePath $lhmExe -WorkingDirectory $lhmDir -WindowStyle Minimized -PassThru
+  Log "LibreHardwareMonitor iniciado (PID $($lhmProc.Id))"
+} elseif (Get-Process -Name 'LibreHardwareMonitor' -ErrorAction SilentlyContinue) {
+  Log 'LibreHardwareMonitor ya estaba abierto; se reutiliza'
 }
 
 # ---- PresentMon (FPS) ----
@@ -55,30 +72,63 @@ function Stop-OurPresentMon {
 function Start-OurPresentMon {
   Stop-OurPresentMon
   Start-Sleep -Milliseconds 300
-  Remove-Item $csv -Force -ErrorAction SilentlyContinue
-  $args = @('--output_file', "`"$csv`"", '--session_name', 'NexoDeckFPS', '--stop_existing_session',
-            '--no_console_stats', '--no_track_input', '--no_track_gpu')
-  return Start-Process -FilePath $pmExe -ArgumentList $args -WindowStyle Hidden -PassThru
+  Remove-Item $csv, $pmOutLog, $pmErrLog -Force -ErrorAction SilentlyContinue
+  $pmArgs = @('--output_file', "`"$csv`"", '--session_name', 'NexoDeckFPS', '--stop_existing_session',
+              '--no_console_stats', '--no_track_input', '--no_track_gpu')
+  $p = Start-Process -FilePath $pmExe -ArgumentList $pmArgs -WindowStyle Hidden -PassThru `
+         -RedirectStandardOutput $pmOutLog -RedirectStandardError $pmErrLog
+  if ($p) { $null = $p.Handle; Log "PresentMon iniciado (PID $($p.Id))" } else { Log 'PresentMon NO pudo iniciarse' }
+  return $p
 }
 
+$script:pmRestarts = 0
+$script:pmLastExit = $null
 $pmProc = $null
 $pmStart = Get-Date
 if (Test-Path $pmExe) { $pmProc = Start-OurPresentMon; $pmStart = Get-Date }
+
+function Write-Status {
+  $running = [bool]($pmProc -and -not $pmProc.HasExited)
+  $st = [ordered]@{
+    time       = (Get-Date).ToString('o')
+    pmExists   = [bool](Test-Path $pmExe)
+    pmRunning  = $running
+    pmExitCode = $script:pmLastExit
+    pmRestarts = $script:pmRestarts
+    lhmExists  = [bool](Test-Path $lhmExe)
+    lhmRunning = [bool](Get-Process -Name 'LibreHardwareMonitor' -ErrorAction SilentlyContinue)
+  }
+  try { ($st | ConvertTo-Json -Compress) | Set-Content -Path $statusFile -Encoding UTF8 } catch {}
+}
 
 try {
   while ($true) {
     if ($ParentPid -gt 0 -and -not (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)) { break }
     (Get-Date).ToString('o') | Set-Content $beatFile
-    # PresentMon escribe una fila por cada fotograma: se reinicia cada 20 min para que el archivo no crezca sin límite
-    if ((Test-Path $pmExe) -and ((-not $pmProc) -or $pmProc.HasExited -or (((Get-Date) - $pmStart).TotalMinutes -ge 20))) {
-      $pmProc = Start-OurPresentMon
-      $pmStart = Get-Date
+
+    if (Test-Path $pmExe) {
+      $exited = $pmProc -and $pmProc.HasExited
+      if ($exited -and $null -eq $script:pmLastExit) {
+        $script:pmLastExit = $pmProc.ExitCode
+        Log "PresentMon terminó con código $($pmProc.ExitCode)"
+      }
+      $sinceStart = ((Get-Date) - $pmStart).TotalSeconds
+      # Si se cierra solo, se reintenta como máximo cada 15 s (así no se borra el CSV en bucle).
+      # PresentMon escribe una fila por fotograma: se reinicia cada 20 min para que el archivo no crezca sin límite.
+      if ((-not $pmProc) -or ($exited -and $sinceStart -ge 15) -or ($sinceStart -ge 1200)) {
+        $script:pmRestarts++
+        $script:pmLastExit = $null
+        $pmProc = Start-OurPresentMon
+        $pmStart = Get-Date
+      }
     }
+    Write-Status
     Start-Sleep -Seconds 2
   }
 }
 finally {
+  Log 'Ayudante detenido'
   Stop-OurPresentMon
   if ($lhmProc -and -not $lhmProc.HasExited) { Stop-Process -Id $lhmProc.Id -Force -ErrorAction SilentlyContinue }
-  Remove-Item $beatFile, $pidFile, $csv -Force -ErrorAction SilentlyContinue
+  Remove-Item $beatFile, $pidFile, $csv, $statusFile -Force -ErrorAction SilentlyContinue
 }
