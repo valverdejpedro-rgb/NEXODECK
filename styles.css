@@ -1,0 +1,136 @@
+:root {
+  --bg: #f3f5f8;
+  --surface: #ffffff;
+  --line: #dde2ea;
+  --text: #151a24;
+  --muted: #667085;
+  --accent: #0f9d8f;
+  --accent-soft: #d6f1ee;
+  --track: #d5dbe5;
+  --danger: #c2410c;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #171c27;
+    --surface: #212838;
+    --line: #2f384b;
+    --text: #eaeef6;
+    --muted: #93a0b8;
+    --accent: #3cc7b6;
+    --accent-soft: #1f4a49;
+    --track: #394359;
+    --danger: #fb923c;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; margin: 0; }
+html, body { background: var(--bg); color: var(--text); overflow: hidden; user-select: none; }
+body { font: 14px/1.4 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+
+#app { padding: 12px; display: grid; gap: 10px; }
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.head { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; }
+.head label { color: var(--muted); font-size: 13px; }
+
+.device {
+  width: 100%;
+  min-width: 0;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 4px 6px;
+  font: inherit;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  text-align: right;
+  cursor: pointer;
+}
+.device:hover { border-color: var(--line); }
+.device:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.device option { background: var(--surface); color: var(--text); font-weight: 400; }
+
+.control { display: grid; grid-template-columns: 36px 1fr 64px; align-items: center; gap: 12px; }
+
+.mute {
+  width: 36px; height: 36px;
+  display: grid; place-items: center;
+  border: 0; border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+}
+.mute svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.mute .slash { display: none; }
+.mute:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.panel.muted .mute { background: transparent; color: var(--danger); box-shadow: inset 0 0 0 1.5px var(--danger); }
+.panel.muted .mute .slash { display: block; }
+.panel.muted .mute .waves { display: none; }
+
+.pct {
+  font-size: 30px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  text-align: right;
+  line-height: 1;
+}
+.panel.muted .pct { color: var(--muted); }
+
+.slider {
+  --v: 0%;
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 22px;
+  background: transparent;
+  cursor: pointer;
+}
+.slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--accent) var(--v), var(--track) var(--v));
+}
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px; height: 18px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+}
+.slider:focus-visible { outline: none; }
+.slider:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--accent-soft); }
+.panel.muted .slider::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, var(--muted) var(--v), var(--track) var(--v));
+}
+.panel.muted .slider::-webkit-slider-thumb { border-color: var(--muted); }
+
+.error { color: var(--danger); font-size: 13px; padding: 0 4px; user-select: text; }
+
+footer {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 8px; min-height: 24px; padding: 0 4px;
+  color: var(--muted); font-size: 12px;
+}
+footer button {
+  font: inherit; font-weight: 600;
+  color: var(--bg); background: var(--accent);
+  border: 0; border-radius: 6px; padding: 3px 10px; cursor: pointer;
+}
+footer button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .mute, .device { transition: background-color .12s, border-color .12s, color .12s; }
+}

@@ -1,0 +1,8 @@
+Aquí va svcl.exe (SoundVolumeCommandLine, de NirSoft).
+
+1. Descárgalo de: https://www.nirsoft.net/utils/sound_volume_command_line.html
+   (versión x64, archivo svcl-x64.zip).
+2. Extrae svcl.exe y ponlo en esta carpeta: bin/svcl.exe
+
+Es opcional para publicar en GitHub (el flujo lo descarga solo si falta),
+pero lo necesitas para probar la app en tu PC con "npm start".
