@@ -134,3 +134,31 @@ footer button:focus-visible { outline: 2px solid var(--accent); outline-offset: 
 @media (prefers-reduced-motion: no-preference) {
   .mute, .device { transition: background-color .12s, border-color .12s, color .12s; }
 }
+
+/* ---------- Pestañas ---------- */
+.tabs { display: flex; gap: 4px; padding: 3px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+.tab {
+  flex: 1; font: inherit; font-weight: 600;
+  color: var(--muted); background: transparent;
+  border: 0; border-radius: 8px; padding: 6px 10px; cursor: pointer;
+}
+.tab:hover { color: var(--text); }
+.tab.active { background: var(--accent-soft); color: var(--accent); }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tab-panel { display: grid; gap: 12px; }
+.tab-panel[hidden] { display: none; }
+
+/* ---------- Audio por aplicación ---------- */
+.count { color: var(--muted); font-size: 12px; padding: 0 4px; }
+#apps-list { display: grid; gap: 10px; }
+.empty { color: var(--muted); text-align: center; padding: 28px 12px; }
+
+.head .lbl { color: var(--muted); font-size: 13px; }
+.app-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.app-icon { width: 24px; height: 24px; flex: none; }
+.app-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.app-state { color: var(--muted); font-size: 12px; flex: none; display: flex; align-items: center; gap: 6px; }
+.app-state::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--track); }
+.app-row.playing .app-state::before { background: var(--accent); }
+.app-row .pct { font-size: 22px; }
+.app-hint { color: var(--muted); font-size: 12px; margin-top: -4px; }

@@ -2,54 +2,67 @@
 <html lang="es">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Centro de Control</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <main id="app">
-    <section class="panel" data-kind="output">
-      <div class="head">
-        <label for="dev-output">Salida</label>
-        <select id="dev-output" class="device" aria-label="Dispositivo de salida"></select>
-      </div>
-      <div class="control">
-        <button class="mute" type="button" aria-label="Silenciar salida" aria-pressed="false">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M4 9v6h4l5 4V5L8 9H4z"/>
-            <path class="waves" d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>
-            <path class="slash" d="M3.5 3.5l17 17"/>
-          </svg>
-        </button>
-        <input class="slider" type="range" min="0" max="100" step="1" value="0" aria-label="Volumen de salida">
-        <output class="pct">0</output>
-      </div>
-    </section>
+    <nav class="tabs" role="tablist" aria-label="Secciones">
+      <button class="tab active" type="button" role="tab" data-tab="devices" aria-selected="true">Dispositivos</button>
+      <button class="tab" type="button" role="tab" data-tab="apps" aria-selected="false" tabindex="-1">Aplicaciones</button>
+    </nav>
 
-    <section class="panel" data-kind="input">
-      <div class="head">
-        <label for="dev-input">Entrada</label>
-        <select id="dev-input" class="device" aria-label="Dispositivo de entrada"></select>
-      </div>
-      <div class="control">
-        <button class="mute" type="button" aria-label="Silenciar entrada" aria-pressed="false">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="9" y="3" width="6" height="11" rx="3"/>
-            <path class="waves" d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>
-            <path class="slash" d="M3.5 3.5l17 17"/>
-          </svg>
-        </button>
-        <input class="slider" type="range" min="0" max="100" step="1" value="0" aria-label="Volumen de entrada">
-        <output class="pct">0</output>
-      </div>
-    </section>
+    <div id="tab-devices" class="tab-panel" role="tabpanel">
+      <section class="panel" data-kind="output">
+        <div class="head">
+          <label for="dev-output">Salida</label>
+          <select id="dev-output" class="device" aria-label="Dispositivo de salida"></select>
+        </div>
+        <div class="control">
+          <button class="mute" type="button" aria-label="Silenciar salida" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 9v6h4l5 4V5L8 9H4z"/>
+              <path class="waves" d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>
+              <path class="slash" d="M3.5 3.5l17 17"/>
+            </svg>
+          </button>
+          <input class="slider" type="range" min="0" max="100" step="1" value="0" aria-label="Volumen de salida">
+          <output class="pct">0</output>
+        </div>
+      </section>
 
-    <p id="error" class="error" hidden></p>
+      <section class="panel" data-kind="input">
+        <div class="head">
+          <label for="dev-input">Entrada</label>
+          <select id="dev-input" class="device" aria-label="Dispositivo de entrada"></select>
+        </div>
+        <div class="control">
+          <button class="mute" type="button" aria-label="Silenciar entrada" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3"/>
+              <path class="waves" d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>
+              <path class="slash" d="M3.5 3.5l17 17"/>
+            </svg>
+          </button>
+          <input class="slider" type="range" min="0" max="100" step="1" value="0" aria-label="Volumen de entrada">
+          <output class="pct">0</output>
+        </div>
+      </section>
+
+      <p id="error" class="error" hidden></p>
+    </div>
+
+    <div id="tab-apps" class="tab-panel" role="tabpanel" hidden>
+      <p id="apps-count" class="count"></p>
+      <div id="apps-list"></div>
+      <p id="apps-empty" class="empty" hidden>No hay aplicaciones con audio abiertas. Abre un video o música y aparecerá aquí.</p>
+      <p id="apps-error" class="error" hidden></p>
+    </div>
 
     <footer>
       <span id="version"></span>
-      <button id="open-mixer" type="button">Mezclador de apps</button>
       <span id="update"></span>
     </footer>
   </main>

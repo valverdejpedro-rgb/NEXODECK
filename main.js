@@ -10,7 +10,7 @@ const LOGIN_ARGS = ['--hidden'];
 const startHidden = process.argv.includes('--hidden');
 
 let win = null;
-let mixerWin = null;
+const appDevices = new Map();
 let csvSeq = 0;
 let tray = null;
 let quitting = false;
@@ -79,8 +79,8 @@ async function readItems() {
   return rows;
 }
 
-async function listDevices() {
-  const rows = await readItems();
+async function listDevices(preRows) {
+  const rows = preRows || (await readItems());
   const header = rows[0].map((h) => h.trim().toLowerCase());
   const col = (n) => header.indexOf(n);
   const iName = col('name'), iType = col('type'), iDir = col('direction'), iDef = col('default');
@@ -100,6 +100,8 @@ async function listDevices() {
     const devName = iDev >= 0 ? (r[iDev] || '').trim() : '';
     out[kind].push({
       id: (r[iId] || '').trim(),
+      base: name,
+      adapter: devName,
       name: devName && devName !== name ? `${name} (${devName})` : name,
       isDefault: def !== '' && !/^no$/i.test(def),
       volume: parseFloat((r[iVol] || '0').replace(',', '.')) || 0,
@@ -135,9 +137,11 @@ async function iconFor(p) {
 // Una fila por aplicación (Chrome y similares abren varias sesiones de audio: se agrupan).
 async function listApps() {
   const rows = await readItems();
+  const outs = (await listDevices(rows)).output;
   const header = rows[0].map((h) => h.trim().toLowerCase());
   const col = (n) => header.indexOf(n);
   const iName = col('name'), iType = col('type'), iDir = col('direction'), iState = col('device state');
+  const iDev = col('device name');
   const iMute = col('muted'), iVol = col('volume percent'), iId = col('command-line friendly id');
   const iPath = col('process path');
   if (iName < 0 || iType < 0) throw new Error('Formato inesperado de svcl.exe');
@@ -160,7 +164,7 @@ async function listApps() {
     const muted = iMute >= 0 && /^(yes|sí|si|true)$/i.test((r[iMute] || '').trim());
     const active = /^active$/i.test(state);
     const g = groups.get(key);
-    if (!g) groups.set(key, { key, target, name, procPath, volume: vol, muted, active });
+    if (!g) groups.set(key, { key, target, name, procPath, volume: vol, muted, active, deviceRaw: iDev >= 0 ? (r[iDev] || '').trim() : '' });
     else {
       g.volume = Math.max(g.volume, vol);
       g.muted = g.muted && muted;
@@ -170,7 +174,34 @@ async function listApps() {
 
   const list = [...groups.values()].sort((a, b) => a.name.localeCompare(b.name, 'es', { sensitivity: 'base' }));
   for (const a of list) a.icon = await iconFor(a.procPath);
-  return list.map(({ procPath, ...rest }) => rest);
+
+  const defId = (outs.find((d) => d.isDefault) || {}).id;
+  const apps = list.map((a) => {
+    const detected = detectDevice(a.deviceRaw, outs);
+    const stored = appDevices.get(a.key);
+    const storedId = stored && stored !== 'default' ? stored : '';
+    let deviceId = detected || storedId || '';
+    let pending = false;
+    if (stored === 'default') { deviceId = ''; pending = !!detected && detected !== defId; }
+    else if (storedId && detected && detected !== storedId) pending = true;
+    return {
+      key: a.key, target: a.target, name: a.name, volume: a.volume, muted: a.muted, active: a.active,
+      icon: a.icon, canRoute: /\.exe$/i.test(a.target), deviceId, deviceRaw: a.deviceRaw, pending,
+    };
+  });
+  return { apps, devices: outs.map(({ id, name }) => ({ id, name })) };
+}
+
+// Intenta saber en qué dispositivo de salida suena la app (según lo que informa svcl).
+function detectDevice(raw, outs) {
+  if (!raw) return null;
+  const r = raw.trim().toLowerCase();
+  const by = (f) => outs.filter((d) => (d[f] || '').toLowerCase() === r);
+  for (const f of ['base', 'name', 'adapter']) {
+    const m = by(f);
+    if (m.length === 1) return m[0].id;
+  }
+  return null;
 }
 
 const validTarget = (t) => typeof t === 'string' && t.length > 0 && t.length < 500 && !/^[/-]/.test(t);
@@ -181,8 +212,13 @@ ipcMain.handle('apps:setVolume', (_, t, pct) => {
   const v = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
   return svcl(['/SetVolume', t, String(v)]);
 });
+ipcMain.handle('apps:setDevice', async (_, t, deviceId) => {
+  if (!validTarget(t)) return;
+  if (deviceId && !validTarget(deviceId)) return;
+  await svcl(['/SetAppDefault', deviceId || 'DefaultRenderDevice', 'all', t]);
+  appDevices.set(t.toLowerCase(), deviceId || 'default');
+});
 ipcMain.handle('apps:setMute', (_, t, muted) => validTarget(t) && svcl([muted ? '/Mute' : '/Unmute', t]));
-ipcMain.handle('ui:openMixer', () => openMixer());
 
 /* ---------- Ajustes guardados ---------- */
 
@@ -215,8 +251,8 @@ function toggleWindow() {
 function createWindow() {
   const b = settings.bounds || {};
   win = new BrowserWindow({
-    width: b.width || 460,
-    height: b.height || 430,
+    width: b.width || 480,
+    height: b.height || 540,
     x: b.x,
     y: b.y,
     minWidth: 380,
@@ -240,7 +276,6 @@ function createWindow() {
     else win.show();
   });
 
-  win.on('closed', () => { if (mixerWin && !mixerWin.isDestroyed()) mixerWin.close(); });
   win.on('focus', () => win.webContents.send('ui:shown'));
   win.on('restore', () => win.webContents.send('ui:shown'));
 
@@ -251,50 +286,11 @@ function createWindow() {
   });
 }
 
-function openMixer() {
-  if (mixerWin && !mixerWin.isDestroyed()) {
-    if (mixerWin.isMinimized()) mixerWin.restore();
-    mixerWin.show();
-    mixerWin.focus();
-    return;
-  }
-  const b = settings.mixerBounds || {};
-  mixerWin = new BrowserWindow({
-    width: b.width || 480,
-    height: b.height || 520,
-    x: b.x,
-    y: b.y,
-    minWidth: 380,
-    minHeight: 300,
-    show: false,
-    title: 'Mezclador de aplicaciones',
-    icon: path.join(__dirname, 'assets', 'icon.png'),
-    autoHideMenuBar: true,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
-  const w = mixerWin;
-  w.setMenuBarVisibility(false);
-  w.loadFile('mixer.html');
-  w.once('ready-to-show', () => w.show());
-  w.on('focus', () => w.webContents.send('ui:shown'));
-  w.on('restore', () => w.webContents.send('ui:shown'));
-  w.on('close', () => {
-    try { settings.mixerBounds = w.getNormalBounds(); saveSettings(); } catch {}
-  });
-  w.on('closed', () => { if (mixerWin === w) mixerWin = null; });
-}
-
 /* ---------- Bandeja ---------- */
 
 function buildMenu() {
   return Menu.buildFromTemplate([
     { label: 'Abrir Centro de Control', click: showWindow },
-    { label: 'Mezclador de aplicaciones', click: openMixer },
     { label: `Minimizar / traer al frente  (${SHORTCUT.replace('Control', 'Ctrl')})`, click: toggleWindow },
     { type: 'separator' },
     {

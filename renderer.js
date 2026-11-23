@@ -133,14 +133,215 @@ function renderUpdate(s) {
   }
 }
 
-document.getElementById('open-mixer').addEventListener('click', () => window.api.openMixer());
-
 window.api.onUpdate(renderUpdate);
-window.api.onShown(refresh);
+window.api.onShown(() => refreshActive());
 window.api.info().then((i) => {
   versionEl.textContent = `Versión ${i.version}`;
   renderUpdate(i.update);
 });
 
+
+/* ---------- Pestañas ---------- */
+
+const tabBtns = [...document.querySelectorAll('.tab')];
+const tabPanels = { devices: document.getElementById('tab-devices'), apps: document.getElementById('tab-apps') };
+let activeTab = 'devices';
+
+function refreshActive() {
+  return activeTab === 'apps' ? refreshApps() : refresh();
+}
+
+function setTab(name) {
+  activeTab = name;
+  for (const b of tabBtns) {
+    const on = b.dataset.tab === name;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+  for (const [k, el] of Object.entries(tabPanels)) el.hidden = k !== name;
+  refreshActive();
+}
+
+tabBtns.forEach((b, i) => {
+  b.addEventListener('click', () => setTab(b.dataset.tab));
+  b.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    const next = tabBtns[(i + (e.key === 'ArrowRight' ? 1 : tabBtns.length - 1)) % tabBtns.length];
+    next.focus();
+    setTab(next.dataset.tab);
+  });
+});
+
+/* ---------- Audio por aplicación ---------- */
+
+const appsListEl = document.getElementById('apps-list');
+const appsEmptyEl = document.getElementById('apps-empty');
+const appsErrorEl = document.getElementById('apps-error');
+const appsCountEl = document.getElementById('apps-count');
+const appRows = new Map();
+let appsBusy = 0;
+let appsOrder = '';
+
+const APP_TEMPLATE = `
+  <div class="app-top">
+    <img class="app-icon" alt="" hidden>
+    <span class="app-name"></span>
+    <span class="app-state"></span>
+  </div>
+  <div class="head app-route">
+    <span class="lbl">Salida</span>
+    <select class="device"></select>
+  </div>
+  <p class="app-hint" hidden>Cambio pendiente: la app lo aplicará cuando reinicie su audio (pausa y reproduce, o ábrela de nuevo).</p>
+  <div class="control">
+    <button class="mute" type="button" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 9v6h4l5 4V5L8 9H4z"/>
+        <path class="waves" d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>
+        <path class="slash" d="M3.5 3.5l17 17"/>
+      </svg>
+    </button>
+    <input class="slider" type="range" min="0" max="100" step="1" value="0">
+    <output class="pct">0</output>
+  </div>`;
+
+function paintApp(row, value) {
+  row.slider.style.setProperty('--v', value + '%');
+  row.pct.textContent = Math.round(value);
+}
+
+async function actApps(fn) {
+  appsBusy++;
+  try { await fn(); } catch {} finally { appsBusy--; }
+  refreshApps();
+}
+
+function makeAppRow() {
+  const el = document.createElement('section');
+  el.className = 'panel app-row';
+  el.innerHTML = APP_TEMPLATE;
+  const row = {
+    el,
+    icon: el.querySelector('.app-icon'),
+    name: el.querySelector('.app-name'),
+    state: el.querySelector('.app-state'),
+    route: el.querySelector('.app-route'),
+    select: el.querySelector('select'),
+    hint: el.querySelector('.app-hint'),
+    control: el.querySelector('.control'),
+    mute: el.querySelector('.mute'),
+    slider: el.querySelector('.slider'),
+    pct: el.querySelector('.pct'),
+    target: '', muted: false, dragging: false, timer: null, sig: '',
+  };
+
+  row.slider.addEventListener('pointerdown', () => { row.dragging = true; });
+  row.slider.addEventListener('input', () => {
+    const v = Number(row.slider.value);
+    paintApp(row, v);
+    clearTimeout(row.timer);
+    row.timer = setTimeout(() => window.api.setAppVolume(row.target, v), 60);
+  });
+  row.slider.addEventListener('change', () => {
+    row.dragging = false;
+    actApps(() => window.api.setAppVolume(row.target, Number(row.slider.value)));
+  });
+  // La rueda solo actúa sobre el control de volumen, para poder desplazar la lista con normalidad.
+  row.control.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const v = Math.max(0, Math.min(100, Number(row.slider.value) + (e.deltaY < 0 ? 5 : -5)));
+    row.slider.value = v;
+    paintApp(row, v);
+    clearTimeout(row.timer);
+    row.timer = setTimeout(() => actApps(() => window.api.setAppVolume(row.target, v)), 80);
+  }, { passive: false });
+  row.mute.addEventListener('click', () => actApps(() => window.api.setAppMute(row.target, !row.muted)));
+  row.select.addEventListener('change', () => actApps(() => window.api.setAppDevice(row.target, row.select.value)));
+  return row;
+}
+
+function updateAppRow(row, a, devices) {
+  row.target = a.target;
+  row.muted = a.muted;
+  row.name.textContent = a.name;
+  row.name.title = a.target;
+  row.state.textContent = a.active ? 'Sonando' : 'En silencio';
+  row.el.classList.toggle('playing', a.active);
+  row.el.classList.toggle('muted', a.muted);
+  row.mute.setAttribute('aria-pressed', String(a.muted));
+  row.mute.setAttribute('aria-label', `Silenciar ${a.name}`);
+  row.slider.setAttribute('aria-label', `Volumen de ${a.name}`);
+  row.select.setAttribute('aria-label', `Dispositivo de salida de ${a.name}`);
+
+  if (a.icon) {
+    if (row.icon.src !== a.icon) row.icon.src = a.icon;
+    row.icon.hidden = false;
+  } else row.icon.hidden = true;
+
+  row.route.hidden = !a.canRoute;
+  row.hint.hidden = !(a.canRoute && a.pending);
+
+  const sig = devices.map((d) => d.id + '|' + d.name).join('\n');
+  if (row.sig !== sig) {
+    row.sig = sig;
+    const first = document.createElement('option');
+    first.value = '';
+    first.textContent = 'Predeterminado del sistema';
+    row.select.replaceChildren(first, ...devices.map((d) => {
+      const o = document.createElement('option');
+      o.value = d.id;
+      o.textContent = d.name;
+      return o;
+    }));
+  }
+  row.select.title = a.deviceRaw ? `Detectado: ${a.deviceRaw}` : '';
+  if (document.activeElement !== row.select) {
+    row.select.value = devices.some((d) => d.id === a.deviceId) ? a.deviceId : '';
+  }
+
+  if (!row.dragging) {
+    row.slider.value = a.volume;
+    paintApp(row, a.volume);
+  }
+}
+
+function renderApps({ apps, devices }) {
+  const seen = new Set();
+  for (const a of apps) {
+    seen.add(a.key);
+    let row = appRows.get(a.key);
+    if (!row) {
+      row = makeAppRow();
+      appRows.set(a.key, row);
+      appsListEl.appendChild(row.el);
+      appsOrder = '';
+    }
+    updateAppRow(row, a, devices);
+  }
+  for (const [key, row] of appRows) {
+    if (!seen.has(key)) { row.el.remove(); appRows.delete(key); appsOrder = ''; }
+  }
+  // Orden alfabético; solo se recoloca si cambió, para no romper un arrastre en curso.
+  const order = apps.map((a) => a.key).join('|');
+  if (order !== appsOrder && ![...appRows.values()].some((r) => r.dragging)) {
+    for (const a of apps) appsListEl.appendChild(appRows.get(a.key).el);
+    appsOrder = order;
+  }
+  appsEmptyEl.hidden = apps.length > 0;
+  appsCountEl.textContent = apps.length === 1 ? '1 aplicación' : `${apps.length} aplicaciones`;
+}
+
+async function refreshApps() {
+  if (appsBusy) return;
+  try {
+    renderApps(await window.api.getApps());
+    appsErrorEl.hidden = true;
+  } catch {
+    appsErrorEl.hidden = false;
+    appsErrorEl.textContent = 'No se pudo leer el audio de las aplicaciones. Revisa que svcl.exe esté incluido en la app.';
+  }
+}
+
 refresh();
-setInterval(() => { if (!document.hidden) refresh(); }, 2500);
+setInterval(() => { if (!document.hidden) refreshActive(); }, 2000);

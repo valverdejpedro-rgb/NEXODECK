@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('api', {
   getApps: () => ipcRenderer.invoke('apps:list'),
   setAppVolume: (target, pct) => ipcRenderer.invoke('apps:setVolume', target, pct),
   setAppMute: (target, muted) => ipcRenderer.invoke('apps:setMute', target, muted),
-  openMixer: () => ipcRenderer.invoke('ui:openMixer'),
+  setAppDevice: (target, deviceId) => ipcRenderer.invoke('apps:setDevice', target, deviceId),
   info: () => ipcRenderer.invoke('app:info'),
   checkUpdates: () => ipcRenderer.invoke('update:check'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
