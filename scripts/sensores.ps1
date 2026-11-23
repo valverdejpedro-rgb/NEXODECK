@@ -73,10 +73,12 @@ function Start-OurPresentMon {
   Stop-OurPresentMon
   Start-Sleep -Milliseconds 300
   Remove-Item $csv, $pmOutLog, $pmErrLog -Force -ErrorAction SilentlyContinue
-  $pmArgs = @('--output_file', "`"$csv`"", '--session_name', 'NexoDeckFPS', '--stop_existing_session',
+  # PresentMon bloquea el archivo que abre con --output_file (la app no podía leerlo: EBUSY).
+  # Con --output_stdout el CSV sale por la salida estándar y PowerShell la guarda en fps.csv sin bloquear la lectura.
+  $pmArgs = @('--output_stdout', '--session_name', 'NexoDeckFPS', '--stop_existing_session',
               '--no_console_stats', '--no_track_input', '--no_track_gpu')
   $p = Start-Process -FilePath $pmExe -ArgumentList $pmArgs -WindowStyle Hidden -PassThru `
-         -RedirectStandardOutput $pmOutLog -RedirectStandardError $pmErrLog
+         -RedirectStandardOutput $csv -RedirectStandardError $pmErrLog
   if ($p) { $null = $p.Handle; Log "PresentMon iniciado (PID $($p.Id))" } else { Log 'PresentMon NO pudo iniciarse' }
   return $p
 }
