@@ -346,8 +346,11 @@ async function listApps() {
     else {
       s.volume = Math.max(s.volume, vol);
       s.muted = s.muted && muted;
+      // Una app puede tener varias sesiones (Zoom deja sesiones viejas "Inactive" abiertas que siguen
+      // apuntando al dispositivo anterior). El dispositivo que cuenta es el de la sesión ACTIVA.
+      if (active && !s.active && deviceRaw) s.deviceRaw = deviceRaw;
+      else if (!s.deviceRaw) s.deviceRaw = deviceRaw;
       s.active = s.active || active;
-      if (!s.deviceRaw) s.deviceRaw = deviceRaw;
     }
   }
 
