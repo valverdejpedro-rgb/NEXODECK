@@ -41,6 +41,78 @@ function svcl(args) {
   return p;
 }
 
+// Cambios de volumen/silencio: no esperan en la cola de lecturas (que puede tardar) y, si llegan varios
+// seguidos para lo mismo, solo se aplica el último (así el control sigue al dedo sin acumular retraso).
+const latest = new Map();
+function svclLatest(key, args) {
+  const cur = latest.get(key);
+  if (cur) { cur.args = args; return cur.promise; }
+  const slot = { args, promise: null };
+  slot.promise = (async () => {
+    try {
+      while (true) {
+        const a = slot.args;
+        await execSvcl(a);
+        if (slot.args === a) break;
+      }
+    } finally { latest.delete(key); }
+  })();
+  latest.set(key, slot);
+  return slot.promise;
+}
+
+/* ---------- Ayudante de audio rápido (API de audio de Windows, sin abrir svcl.exe cada vez) ---------- */
+
+const FA_PS1 = app.isPackaged ? path.join(process.resourcesPath, 'audio.ps1') : path.join(__dirname, 'scripts', 'audio.ps1');
+const fa = { proc: null, ready: false, seq: 0, wait: new Map(), buf: '', startedAt: 0, dead: false };
+
+function faStop() {
+  for (const w of fa.wait.values()) { clearTimeout(w.timer); w.resolve(false); }
+  fa.wait.clear();
+  fa.proc = null; fa.ready = false; fa.buf = '';
+}
+
+function startFastAudio() {
+  if (fa.proc || fa.dead || process.platform !== 'win32' || !fs.existsSync(FA_PS1)) return;
+  if (Date.now() - fa.startedAt < 10000) return;
+  fa.startedAt = Date.now();
+  try {
+    const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', FA_PS1],
+      { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+    fa.proc = proc;
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (d) => {
+      fa.buf += d;
+      let i;
+      while ((i = fa.buf.indexOf('\n')) >= 0) {
+        const line = fa.buf.slice(0, i).replace(/\r$/, '');
+        fa.buf = fa.buf.slice(i + 1);
+        if (line === 'READY') { fa.ready = true; continue; }
+        if (line.startsWith('FAIL')) { fa.dead = true; continue; }
+        const [id, res] = line.split('\t');
+        const w = fa.wait.get(id);
+        if (w) { clearTimeout(w.timer); fa.wait.delete(id); w.resolve(res === 'OK'); }
+      }
+    });
+    proc.stdin.on('error', () => {});
+    proc.on('exit', () => { if (fa.proc === proc) faStop(); });
+    proc.on('error', () => { if (fa.proc === proc) faStop(); });
+  } catch { faStop(); }
+}
+
+// Devuelve true si el ayudante aplicó el cambio; false para que se use svcl.exe como respaldo.
+function fastAudio(cmd, target, num) {
+  startFastAudio();
+  if (!fa.proc || !fa.ready || !target) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const id = String(++fa.seq);
+    const timer = setTimeout(() => { fa.wait.delete(id); resolve(false); }, 1500);
+    fa.wait.set(id, { resolve, timer });
+    try { fa.proc.stdin.write(`${id}\t${cmd}\t${Buffer.from(String(target), 'utf8').toString('base64')}\t${num}\n`); }
+    catch { clearTimeout(timer); fa.wait.delete(id); resolve(false); }
+  });
+}
+
 function decode(buf) {
   if (buf[0] === 0xff && buf[1] === 0xfe) return buf.toString('utf16le').replace(/^\uFEFF/, '');
   if (buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) return buf.toString('utf8').slice(1);
@@ -80,13 +152,14 @@ async function readItems() {
   return rows;
 }
 
+const itemIds = new Map(); // id de línea de comandos (svcl) -> id interno del dispositivo en Windows
 async function listDevices(preRows) {
   const rows = preRows || (await readItems());
   const header = rows[0].map((h) => h.trim().toLowerCase());
   const col = (n) => header.indexOf(n);
   const iName = col('name'), iType = col('type'), iDir = col('direction'), iDef = col('default');
   const iState = col('device state'), iMute = col('muted'), iVol = col('volume percent');
-  const iId = col('command-line friendly id'), iDev = col('device name');
+  const iId = col('command-line friendly id'), iDev = col('device name'), iItem = col('item id');
   if (iName < 0 || iId < 0 || iDir < 0) throw new Error('Formato inesperado de svcl.exe');
 
   const out = { output: [], input: [] };
@@ -99,8 +172,10 @@ async function listDevices(preRows) {
     const def = iDef >= 0 ? (r[iDef] || '').trim() : '';
     const name = (r[iName] || '').trim();
     const devName = iDev >= 0 ? (r[iDev] || '').trim() : '';
+    const cid = (r[iId] || '').trim();
+    if (iItem >= 0 && cid) itemIds.set(cid, (r[iItem] || '').trim());
     out[kind].push({
-      id: (r[iId] || '').trim(),
+      id: cid,
       base: name,
       adapter: devName,
       name: devName && devName !== name ? `${name} (${devName})` : name,
@@ -115,13 +190,21 @@ async function listDevices(preRows) {
 const validId = (id) => typeof id === 'string' && id.length > 0 && id.length < 500;
 
 ipcMain.handle('audio:state', () => listDevices());
-ipcMain.handle('audio:setVolume', (_, id, pct) => {
+ipcMain.handle('audio:setVolume', async (_, id, pct) => {
   if (!validId(id)) return;
   micWatch.lastSetAt = Date.now();
   const v = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
-  return svcl(['/SetVolume', id, String(v)]);
+  if (await fastAudio('EV', itemIds.get(id), v)) return;
+  return svclLatest('dev|' + id, ['/SetVolume', id, String(v)]);
 });
-ipcMain.handle('audio:toggleMute', (_, id) => validId(id) && svcl(['/Switch', id]));
+ipcMain.handle('audio:toggleMute', async (_, id, muted) => {
+  if (!validId(id)) return;
+  if (typeof muted === 'boolean') {
+    if (await fastAudio('EM', itemIds.get(id), muted ? 1 : 0)) return;
+    return svclLatest('devm|' + id, [muted ? '/Mute' : '/Unmute', id]);
+  }
+  return svcl(['/Switch', id]);
+});
 ipcMain.handle('audio:setDefault', (_, id) => validId(id) && svcl(['/SetDefault', id, 'all']));
 
 /* ---------- Audio por aplicación ---------- */
@@ -138,6 +221,8 @@ async function iconFor(p) {
 
 // Una fila por aplicación (Chrome y similares abren varias sesiones de audio: se agrupan).
 // Cada app puede tener sesión de salida (render) y/o de entrada (capture, p. ej. Discord usando el micrófono).
+const micSeen = new Set();
+const MIC_APPS = /discord|teams|zoom|skype|telegram|whatsapp|slack|obs|webex|viber|signal|teamspeak|ts3client|mumble|streamlabs|medal|overwolf|guilded|element|steam\.exe|meet/i;
 async function listApps() {
   const rows = await readItems();
   const all = await listDevices(rows);
@@ -193,15 +278,19 @@ async function listApps() {
   const defIn = (ins.find((d) => d.isDefault) || {}).id;
   const apps = list.map((a) => {
     const canRoute = /\.exe$/i.test(a.target);
+    if (a.capture) micSeen.add(a.key);
+    // Programas de llamadas/streaming: el selector de micrófono se ofrece aunque ahora mismo no estén
+    // usando el micrófono (Discord, por ejemplo, solo abre una sesión de entrada dentro de una llamada).
+    const showIn = canRoute && (!!a.capture || micSeen.has(a.key) || MIC_APPS.test(a.target));
     const main = a.render || a.capture;
     return {
       key: a.key, target: a.target, name: a.name, icon: a.icon, canRoute,
-      hasOut: !!a.render, hasIn: !!a.capture,
+      hasOut: !!a.render, hasIn: !!a.capture, showIn,
       volume: main.volume, muted: main.muted,
       active: a.render ? a.render.active : false,
       micActive: a.capture ? a.capture.active : false,
       out: a.render ? routeInfo(a.key + '|out', a.render, outs, defOut) : null,
-      in: a.capture ? routeInfo(a.key + '|in', a.capture, ins, defIn) : null,
+      in: a.capture ? routeInfo(a.key + '|in', a.capture, ins, defIn) : (showIn ? routeInfo(a.key + '|in', { deviceRaw: '' }, ins, defIn) : null),
     };
   });
   return {
@@ -237,10 +326,11 @@ function detectDevice(raw, devs) {
 const validTarget = (t) => typeof t === 'string' && t.length > 0 && t.length < 500 && !/^[/-]/.test(t);
 
 ipcMain.handle('apps:list', () => listApps());
-ipcMain.handle('apps:setVolume', (_, t, pct) => {
+ipcMain.handle('apps:setVolume', async (_, t, pct) => {
   if (!validTarget(t)) return;
   const v = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
-  return svcl(['/SetVolume', t, String(v)]);
+  if (/\.exe$/i.test(t) && await fastAudio('AV', t, v)) return;
+  return svclLatest('app|' + t.toLowerCase(), ['/SetVolume', t, String(v)]);
 });
 ipcMain.handle('apps:setDevice', async (_, t, deviceId, kind) => {
   if (!validTarget(t)) return;
@@ -250,7 +340,11 @@ ipcMain.handle('apps:setDevice', async (_, t, deviceId, kind) => {
   await svcl(['/SetAppDefault', deviceId || fallback, 'all', t]);
   appDevices.set(t.toLowerCase() + (isIn ? '|in' : '|out'), deviceId || 'default');
 });
-ipcMain.handle('apps:setMute', (_, t, muted) => validTarget(t) && svcl([muted ? '/Mute' : '/Unmute', t]));
+ipcMain.handle('apps:setMute', async (_, t, muted) => {
+  if (!validTarget(t)) return;
+  if (/\.exe$/i.test(t) && await fastAudio('AM', t, muted ? 1 : 0)) return;
+  return svclLatest('appm|' + t.toLowerCase(), [muted ? '/Mute' : '/Unmute', t]);
+});
 
 /* ---------- Vigilante del volumen del micrófono ---------- */
 
@@ -472,7 +566,7 @@ function gpusFromLhm(sensors) {
 }
 
 // Une todo: NVIDIA (nvidia-smi) + el resto (LibreHardwareMonitor) + las que Windows ve pero aún sin sensores.
-function buildGpus(nvidia, lhmSensors) {
+function buildGpus(nvidia, lhmSensors, cpuTemp) {
   const gpus = [...nvidia];
   if (lhmSensors) {
     for (const g of gpusFromLhm(lhmSensors)) {
@@ -493,6 +587,12 @@ function buildGpus(nvidia, lhmSensors) {
   // Si LibreHardwareMonitor no trajo nombre, se toma el de Windows para ese fabricante
   for (const g of gpus) {
     if (!g.name && gpuNames) g.name = gpuNames.find((n) => vendorOf(n) === g.vendor) || '';
+  }
+  // Las gráficas integradas (Radeon Vega/Graphics del Ryzen, Intel UHD/Iris) no tienen sensor propio:
+  // viven dentro del mismo chip que la CPU, así que se muestra la temperatura del chip.
+  for (const g of gpus) {
+    const integrated = g.vendor === 'intel' || (g.vendor === 'amd' && !/\bRX\b|Radeon Pro|\bR[579]\s*\d{3}|\bW\d{4}/i.test(g.name || ''));
+    if (g.temp == null && integrated && cpuTemp != null) { g.temp = cpuTemp; g.tempShared = true; }
   }
   const rank = { nvidia: 0, amd: 1, intel: 2, otra: 3 };
   return gpus.sort((a, b) => (rank[a.vendor] ?? 9) - (rank[b.vendor] ?? 9));
@@ -796,7 +896,7 @@ ipcMain.handle('sys:state', async () => {
   const [nvidia, lhmSensors] = await Promise.all([readNvidia(), readLhm()]);
   lhmCache = { at: Date.now(), sensors: lhmSensors };
   const lhm = lhmSensors ? summarizeLhm(lhmSensors) : null;
-  const gpus = buildGpus(nvidia, lhmSensors);
+  const gpus = buildGpus(nvidia, lhmSensors, lhm ? lhm.cpuTemp : null);
   const helper = helperActive();
   const total = os.totalmem(), free = os.freemem();
 
@@ -1069,6 +1169,7 @@ if (!app.requestSingleInstanceLock()) {
     createTray();
     setupUpdater();
     startMicWatch();
+    startFastAudio();
     globalShortcut.register(SHORTCUT, toggleWindow);
 
     if (app.isPackaged) {
@@ -1086,5 +1187,9 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('window-all-closed', () => app.quit());
-  app.on('will-quit', () => { globalShortcut.unregisterAll(); if (hsProc) { try { hsProc.kill(); } catch {} } });
+  app.on('will-quit', () => {
+    globalShortcut.unregisterAll();
+    if (hsProc) { try { hsProc.kill(); } catch {} }
+    if (fa.proc) { try { fa.proc.kill(); } catch {} }
+  });
 }

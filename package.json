@@ -1,7 +1,7 @@
 {
   "name": "centro-control-pc",
   "productName": "Centro de Control",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Centro de control de PC: volumen y dispositivos de audio desde una barra",
   "main": "main.js",
   "author": "Pedro",
@@ -59,6 +59,10 @@
       {
         "from": "scripts/audifonos.ps1",
         "to": "audifonos.ps1"
+      },
+      {
+        "from": "scripts/audio.ps1",
+        "to": "audio.ps1"
       }
     ],
     "win": {

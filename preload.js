@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   getState: () => ipcRenderer.invoke('audio:state'),
   setVolume: (id, pct) => ipcRenderer.invoke('audio:setVolume', id, pct),
-  toggleMute: (id) => ipcRenderer.invoke('audio:toggleMute', id),
+  toggleMute: (id, muted) => ipcRenderer.invoke('audio:toggleMute', id, muted),
   setDefault: (id) => ipcRenderer.invoke('audio:setDefault', id),
   getApps: () => ipcRenderer.invoke('apps:list'),
   setAppVolume: (target, pct) => ipcRenderer.invoke('apps:setVolume', target, pct),

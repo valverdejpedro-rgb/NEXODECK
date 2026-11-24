@@ -13,6 +13,17 @@ for (const kind of KINDS) {
     dragging: false,
     sendTimer: null,
     signature: '',
+    send: null,
+  };
+}
+// Envía el valor al instante y, mientras se arrastra, como mucho cada ~30 ms (siempre llega el último valor).
+function makeSender(fn, ms = 30) {
+  let last = 0, timer = null, val = 0;
+  return (v) => {
+    val = v;
+    const wait = ms - (Date.now() - last);
+    if (wait <= 0) { clearTimeout(timer); timer = null; last = Date.now(); fn(val); }
+    else if (!timer) timer = setTimeout(() => { timer = null; last = Date.now(); fn(val); }, wait);
   };
 }
 const errorEl = document.getElementById('error');
@@ -96,6 +107,9 @@ async function refreshHeadset() {
   hsNote.textContent = note;
 }
 
+// El preset del audífono se lee aparte y más seguido (cada 0,5 s) para que el cambio se vea casi al instante.
+setInterval(() => { if (!document.hidden && activeTab === 'devices') refreshHeadset(); }, 500);
+
 async function refresh() {
   if (busy) return;
   try {
@@ -116,13 +130,12 @@ async function act(fn) {
 for (const kind of KINDS) {
   const p = panels[kind];
 
+  p.send = makeSender((v) => { if (p.current) window.api.setVolume(p.current.id, v).catch(() => {}); });
   p.slider.addEventListener('pointerdown', () => { p.dragging = true; });
   p.slider.addEventListener('input', () => {
     const v = Number(p.slider.value);
     paintSlider(p, v);
-    if (!p.current) return;
-    clearTimeout(p.sendTimer);
-    p.sendTimer = setTimeout(() => window.api.setVolume(p.current.id, v), 40);
+    if (p.current) p.send(v);
   });
   p.slider.addEventListener('change', () => {
     p.dragging = false;
@@ -135,12 +148,18 @@ for (const kind of KINDS) {
     const v = Math.max(0, Math.min(100, Number(p.slider.value) + (e.deltaY < 0 ? 5 : -5)));
     p.slider.value = v;
     paintSlider(p, v);
+    p.send(v);
     clearTimeout(p.sendTimer);
-    p.sendTimer = setTimeout(() => act(() => window.api.setVolume(p.current.id, v)), 60);
+    p.sendTimer = setTimeout(() => act(() => window.api.setVolume(p.current.id, v)), 300);
   }, { passive: false });
 
   p.mute.addEventListener('click', () => {
-    if (p.current) act(() => window.api.toggleMute(p.current.id));
+    if (!p.current) return;
+    const next = !p.current.muted;
+    p.current.muted = next;                  // se ve al instante, sin esperar a Windows
+    p.el.classList.toggle('muted', next);
+    p.mute.setAttribute('aria-pressed', String(next));
+    act(() => window.api.toggleMute(p.current.id, next));
   });
 
   p.select.addEventListener('change', () => {
@@ -286,14 +305,15 @@ function makeAppRow() {
     slider: el.querySelector('.slider'),
     pct: el.querySelector('.pct'),
     target: '', muted: false, active: false, micActive: false, dragging: false, timer: null, sigOut: '', sigIn: '',
+    send: null,
   };
+  row.send = makeSender((v) => window.api.setAppVolume(row.target, v).catch(() => {}));
 
   row.slider.addEventListener('pointerdown', () => { row.dragging = true; });
   row.slider.addEventListener('input', () => {
     const v = Number(row.slider.value);
     paintApp(row, v);
-    clearTimeout(row.timer);
-    row.timer = setTimeout(() => window.api.setAppVolume(row.target, v), 60);
+    row.send(v);
   });
   row.slider.addEventListener('change', () => {
     row.dragging = false;
@@ -305,8 +325,9 @@ function makeAppRow() {
     const v = Math.max(0, Math.min(100, Number(row.slider.value) + (e.deltaY < 0 ? 5 : -5)));
     row.slider.value = v;
     paintApp(row, v);
+    row.send(v);
     clearTimeout(row.timer);
-    row.timer = setTimeout(() => actApps(() => window.api.setAppVolume(row.target, v)), 80);
+    row.timer = setTimeout(() => actApps(() => window.api.setAppVolume(row.target, v)), 300);
   }, { passive: false });
   row.mute.addEventListener('click', () => {
     const next = !row.muted;
@@ -367,7 +388,7 @@ function updateAppRow(row, a, devices, inputs) {
   } else row.icon.hidden = true;
 
   updateRoute(row.outRoute, row.outSelect, row.outHint, a.out, a.canRoute && a.hasOut, devices, 'sigOut', row);
-  updateRoute(row.inRoute, row.inSelect, row.inHint, a.in, a.canRoute && a.hasIn, inputs, 'sigIn', row);
+  updateRoute(row.inRoute, row.inSelect, row.inHint, a.in, a.canRoute && (a.hasIn || a.showIn), inputs, 'sigIn', row);
 
   row.control.hidden = !a.hasOut; // una app que solo usa el micrófono no tiene volumen de salida
   if (!row.dragging) {
@@ -738,7 +759,7 @@ function renderSystem(s) {
       big: g.usage == null ? null : Math.round(g.usage), unit: g.usage == null ? '' : '%',
       temp: fmtT(g.temp), tempLevel: tLv, alert: tLv,
       pct: g.usage, level: level(g.usage, LIMITS.usage),
-      note: hasData ? '' : 'Detectada. Activa los sensores avanzados para ver su uso y temperatura.',
+      note: g.tempShared ? 'Gráfica integrada: comparte chip con la CPU, por eso muestra la temperatura del chip.' : (hasData ? '' : 'Detectada. Activa los sensores avanzados para ver su uso y temperatura.'),
     });
     if (tLv === 'hot') alerts.push({ key: `gpu-temp-${i}`, msg: `${label} a ${Math.round(g.temp)} °C: está muy caliente.` });
     if (g.vramTotal) {
