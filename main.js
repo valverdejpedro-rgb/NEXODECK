@@ -308,7 +308,7 @@ async function liveApps() {
 
 async function listApps() {
   const rows = await getRows();
-  const [mic, live] = await Promise.all([readMicUse().catch(() => new Map()), liveApps().catch(() => new Map())]);
+  const live = await liveApps().catch(() => new Map());
   const all = await listDevices(rows);
   const outs = all.output, ins = all.input;
   const header = rows[0].map((h) => h.trim().toLowerCase());
@@ -341,8 +341,6 @@ async function listApps() {
     const deviceRaw = iDev >= 0 ? (r[iDev] || '').trim() : '';
     let g = groups.get(key);
     if (!g) { g = { key, target, name, procPath, render: null, capture: null }; groups.set(key, g); }
-    // Entrada que Windows dice que ya no se está usando (p. ej. Discord fuera de llamada): no se toma en cuenta.
-    if (side === 'capture' && exe && mic.get(exe.toLowerCase()) === false) continue;
     const s = g[side];
     if (!s) g[side] = { volume: vol, muted, active, deviceRaw };
     else {
