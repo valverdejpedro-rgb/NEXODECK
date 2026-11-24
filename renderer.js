@@ -110,15 +110,18 @@ async function refreshHeadset() {
 // El preset del audífono se lee aparte y más seguido (cada 0,5 s) para que el cambio se vea casi al instante.
 setInterval(() => { if (!document.hidden && activeTab === 'devices') refreshHeadset(); }, 500);
 
+let refreshing = false;
 async function refresh() {
-  if (busy) return;
+  if (busy || refreshing) return;
+  refreshing = true;
   try {
-    render(await window.api.getState());
+    const st = await window.api.getState();
+    if (!busy) render(st);   // si mientras tanto se tocó un control, esta lectura ya es vieja
     showError('');
     refreshHeadset();
   } catch (e) {
     showError('No se pudo leer el audio. Revisa que bin/svcl.exe esté incluido en la app.');
-  }
+  } finally { refreshing = false; }
 }
 
 async function act(fn) {
@@ -388,7 +391,7 @@ function updateAppRow(row, a, devices, inputs) {
   } else row.icon.hidden = true;
 
   updateRoute(row.outRoute, row.outSelect, row.outHint, a.out, a.canRoute && a.hasOut, devices, 'sigOut', row);
-  updateRoute(row.inRoute, row.inSelect, row.inHint, a.in, a.canRoute && (a.hasIn || a.showIn), inputs, 'sigIn', row);
+  updateRoute(row.inRoute, row.inSelect, row.inHint, a.in, a.canRoute && a.hasIn, inputs, 'sigIn', row);
 
   row.control.hidden = !a.hasOut; // una app que solo usa el micrófono no tiene volumen de salida
   if (!row.dragging) {
@@ -423,15 +426,18 @@ function renderApps({ apps, devices, inputs }) {
   appsCountEl.textContent = apps.length === 1 ? '1 aplicación' : `${apps.length} aplicaciones`;
 }
 
+let appsRefreshing = false;
 async function refreshApps() {
-  if (appsBusy) return;
+  if (appsBusy || appsRefreshing) return;
+  appsRefreshing = true;
   try {
-    renderApps(await window.api.getApps());
+    const st = await window.api.getApps();
+    if (!appsBusy) renderApps(st);
     appsErrorEl.hidden = true;
   } catch {
     appsErrorEl.hidden = false;
     appsErrorEl.textContent = 'No se pudo leer el audio de las aplicaciones. Revisa que svcl.exe esté incluido en la app.';
-  }
+  } finally { appsRefreshing = false; }
 }
 
 /* ---------- Perfiles de energía ---------- */
@@ -831,7 +837,10 @@ sysEnableBtn.addEventListener('click', async () => {
   setTimeout(refreshSystem, 1500);
 });
 
-setInterval(() => { if (!document.hidden && activeTab === 'system') refreshSystem(); }, 1000);
+setInterval(() => { if (!document.hidden && activeTab === 'system') refreshSystem(); }, 500);
+// Volumen y silencio se leen directo de Windows (milisegundos), así que se pueden consultar muy seguido.
+setInterval(() => { if (!document.hidden && activeTab === 'devices') refresh(); }, 400);
+setInterval(() => { if (!document.hidden && activeTab === 'apps') refreshApps(); }, 700);
 
 refresh();
 setInterval(() => { if (!document.hidden) refreshActive(); }, 2000);

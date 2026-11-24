@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, globalShortcut, nativeImage, clipboard } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, globalShortcut, nativeImage, clipboard, screen } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { execFile, spawn } = require('child_process');
 const path = require('path');
@@ -67,7 +67,7 @@ const FA_PS1 = app.isPackaged ? path.join(process.resourcesPath, 'audio.ps1') : 
 const fa = { proc: null, ready: false, seq: 0, wait: new Map(), buf: '', startedAt: 0, dead: false };
 
 function faStop() {
-  for (const w of fa.wait.values()) { clearTimeout(w.timer); w.resolve(false); }
+  for (const w of fa.wait.values()) { clearTimeout(w.timer); w.resolve(null); }
   fa.wait.clear();
   fa.proc = null; fa.ready = false; fa.buf = '';
 }
@@ -89,9 +89,9 @@ function startFastAudio() {
         fa.buf = fa.buf.slice(i + 1);
         if (line === 'READY') { fa.ready = true; continue; }
         if (line.startsWith('FAIL')) { fa.dead = true; continue; }
-        const [id, res] = line.split('\t');
+        const [id, res, payload] = line.split('\t');
         const w = fa.wait.get(id);
-        if (w) { clearTimeout(w.timer); fa.wait.delete(id); w.resolve(res === 'OK'); }
+        if (w) { clearTimeout(w.timer); fa.wait.delete(id); w.resolve({ ok: res === 'OK', payload: payload || '' }); }
       }
     });
     proc.stdin.on('error', () => {});
@@ -100,18 +100,20 @@ function startFastAudio() {
   } catch { faStop(); }
 }
 
-// Devuelve true si el ayudante aplicó el cambio; false para que se use svcl.exe como respaldo.
-function fastAudio(cmd, target, num) {
+// Envía una orden al ayudante. Devuelve { ok, payload } o null si no está disponible.
+function fastCall(cmd, target, num) {
   startFastAudio();
-  if (!fa.proc || !fa.ready || !target) return Promise.resolve(false);
+  if (!fa.proc || !fa.ready) return Promise.resolve(null);
   return new Promise((resolve) => {
     const id = String(++fa.seq);
-    const timer = setTimeout(() => { fa.wait.delete(id); resolve(false); }, 1500);
+    const timer = setTimeout(() => { fa.wait.delete(id); resolve(null); }, 1500);
     fa.wait.set(id, { resolve, timer });
-    try { fa.proc.stdin.write(`${id}\t${cmd}\t${Buffer.from(String(target), 'utf8').toString('base64')}\t${num}\n`); }
-    catch { clearTimeout(timer); fa.wait.delete(id); resolve(false); }
+    try { fa.proc.stdin.write(`${id}\t${cmd}\t${Buffer.from(String(target), 'utf8').toString('base64')}\t${num || 0}\n`); }
+    catch { clearTimeout(timer); fa.wait.delete(id); resolve(null); }
   });
 }
+// true si el ayudante aplicó el cambio; false para que se use svcl.exe como respaldo.
+const fastAudio = (cmd, target, num) => (target ? fastCall(cmd, target, num).then((r) => !!(r && r.ok)) : Promise.resolve(false));
 
 function decode(buf) {
   if (buf[0] === 0xff && buf[1] === 0xfe) return buf.toString('utf16le').replace(/^\uFEFF/, '');
@@ -142,6 +144,25 @@ function parseCsv(text) {
   return rows;
 }
 
+// Lectura completa de svcl con caché: se sirve lo último que se leyó y se renueva en segundo plano,
+// así la pantalla puede consultar muy seguido sin esperar a que svcl termine.
+const rc = { rows: null, at: 0, p: null, gen: 0 };
+function refreshRows() {
+  if (rc.p) return rc.p;
+  const gen = rc.gen;
+  const p = readItems().then((r) => { if (gen === rc.gen) { rc.rows = r; rc.at = Date.now(); } return r; });
+  rc.p = p;
+  const clear = () => { if (rc.p === p) rc.p = null; };
+  p.then(clear, clear);
+  return p;
+}
+async function getRows(maxAge = 2500) {
+  if (rc.rows && Date.now() - rc.at < maxAge) return rc.rows;
+  if (rc.rows) { refreshRows().catch(() => {}); return rc.rows; }
+  return refreshRows();
+}
+function invalidateRows() { rc.rows = null; rc.gen++; rc.p = null; }
+
 async function readItems() {
   const tmp = path.join(os.tmpdir(), `centro-control-${process.pid}-${++csvSeq}.csv`);
   await svcl(['/scomma', tmp]);
@@ -154,7 +175,7 @@ async function readItems() {
 
 const itemIds = new Map(); // id de línea de comandos (svcl) -> id interno del dispositivo en Windows
 async function listDevices(preRows) {
-  const rows = preRows || (await readItems());
+  const rows = preRows || (await getRows());
   const header = rows[0].map((h) => h.trim().toLowerCase());
   const col = (n) => header.indexOf(n);
   const iName = col('name'), iType = col('type'), iDir = col('direction'), iDef = col('default');
@@ -189,7 +210,23 @@ async function listDevices(preRows) {
 
 const validId = (id) => typeof id === 'string' && id.length > 0 && id.length < 500;
 
-ipcMain.handle('audio:state', () => listDevices());
+// Volumen y silencio en vivo (directo de Windows, en milisegundos) sobre la lista de dispositivos.
+async function overlayDevices(st) {
+  const all = [...st.output, ...st.input];
+  const ids = all.map((d) => itemIds.get(d.id) || '');
+  if (!ids.some(Boolean)) return;
+  const r = await fastCall('EGM', ids.join('|'), 0);
+  if (!r || !r.ok) return;
+  r.payload.split(';').forEach((x, i) => {
+    const m = x.match(/^(\d+),([01])$/);
+    if (m && all[i]) { all[i].volume = Number(m[1]); all[i].muted = m[2] === '1'; }
+  });
+}
+ipcMain.handle('audio:state', async () => {
+  const st = await listDevices();
+  await overlayDevices(st);
+  return st;
+});
 ipcMain.handle('audio:setVolume', async (_, id, pct) => {
   if (!validId(id)) return;
   micWatch.lastSetAt = Date.now();
@@ -199,13 +236,14 @@ ipcMain.handle('audio:setVolume', async (_, id, pct) => {
 });
 ipcMain.handle('audio:toggleMute', async (_, id, muted) => {
   if (!validId(id)) return;
+  invalidateRows();
   if (typeof muted === 'boolean') {
     if (await fastAudio('EM', itemIds.get(id), muted ? 1 : 0)) return;
     return svclLatest('devm|' + id, [muted ? '/Mute' : '/Unmute', id]);
   }
   return svcl(['/Switch', id]);
 });
-ipcMain.handle('audio:setDefault', (_, id) => validId(id) && svcl(['/SetDefault', id, 'all']));
+ipcMain.handle('audio:setDefault', (_, id) => { if (!validId(id)) return; invalidateRows(); return svcl(['/SetDefault', id, 'all']); });
 
 /* ---------- Audio por aplicación ---------- */
 
@@ -221,10 +259,56 @@ async function iconFor(p) {
 
 // Una fila por aplicación (Chrome y similares abren varias sesiones de audio: se agrupan).
 // Cada app puede tener sesión de salida (render) y/o de entrada (capture, p. ej. Discord usando el micrófono).
-const micSeen = new Set();
-const MIC_APPS = /discord|teams|zoom|skype|telegram|whatsapp|slack|obs|webex|viber|signal|teamspeak|ts3client|mumble|streamlabs|medal|overwolf|guilded|element|steam\.exe|meet/i;
+// Windows anota qué programas están usando el micrófono AHORA (es lo que enciende el icono de micrófono de la
+// barra): mientras lo usan, "LastUsedTimeStop" vale 0. Discord deja su sesión de entrada abierta al salir de
+// una llamada, y así se distingue de un uso real.
+let micUse = { at: 0, map: new Map(), p: null };
+function readMicUse() {
+  if (micUse.p) return micUse.p;
+  if (Date.now() - micUse.at < 1500) return Promise.resolve(micUse.map);
+  micUse.p = new Promise((resolve) => {
+    execFile('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone\\NonPackaged', '/s'],
+      { windowsHide: true, timeout: 4000, maxBuffer: 4 * 1024 * 1024 }, (err, so) => {
+        const entries = [];
+        if (!err) {
+          let cur = null;
+          for (const line of String(so).split(/\r?\n/)) {
+            if (/^HKEY_/i.test(line)) {
+              const seg = line.trim().split('\\').pop();
+              const exe = seg.split('#').pop().toLowerCase();
+              cur = exe.endsWith('.exe') ? { exe, start: 0n, stop: 0n } : null;
+              if (cur) entries.push(cur);
+              continue;
+            }
+            if (!cur) continue;
+            const m = line.match(/LastUsedTime(Start|Stop)\s+REG_QWORD\s+0x([0-9a-f]+)/i);
+            if (m) cur[m[1].toLowerCase()] = BigInt('0x' + m[2]);
+          }
+        }
+        // Un mismo programa puede tener varias rutas (versiones): cuenta como en uso si alguna lo está.
+        const out = new Map();
+        for (const v of entries) out.set(v.exe, !!out.get(v.exe) || (v.start !== 0n && v.stop === 0n));
+        micUse = { at: Date.now(), map: out, p: null };
+        resolve(out);
+      });
+  });
+  return micUse.p;
+}
+
+// Volumen y silencio en vivo de las apps (directo de Windows).
+async function liveApps() {
+  const r = await fastCall('AL', '-', 0);
+  const m = new Map();
+  if (r && r.ok) for (const x of r.payload.split(';')) {
+    const q = x.match(/^(.+)=(\d+),([01])$/);
+    if (q) m.set(q[1], { volume: Number(q[2]), muted: q[3] === '1' });
+  }
+  return m;
+}
+
 async function listApps() {
-  const rows = await readItems();
+  const rows = await getRows();
+  const [mic, live] = await Promise.all([readMicUse().catch(() => new Map()), liveApps().catch(() => new Map())]);
   const all = await listDevices(rows);
   const outs = all.output, ins = all.input;
   const header = rows[0].map((h) => h.trim().toLowerCase());
@@ -257,6 +341,8 @@ async function listApps() {
     const deviceRaw = iDev >= 0 ? (r[iDev] || '').trim() : '';
     let g = groups.get(key);
     if (!g) { g = { key, target, name, procPath, render: null, capture: null }; groups.set(key, g); }
+    // Entrada que Windows dice que ya no se está usando (p. ej. Discord fuera de llamada): no se toma en cuenta.
+    if (side === 'capture' && exe && mic.get(exe.toLowerCase()) === false) continue;
     const s = g[side];
     if (!s) g[side] = { volume: vol, muted, active, deviceRaw };
     else {
@@ -278,19 +364,16 @@ async function listApps() {
   const defIn = (ins.find((d) => d.isDefault) || {}).id;
   const apps = list.map((a) => {
     const canRoute = /\.exe$/i.test(a.target);
-    if (a.capture) micSeen.add(a.key);
-    // Programas de llamadas/streaming: el selector de micrófono se ofrece aunque ahora mismo no estén
-    // usando el micrófono (Discord, por ejemplo, solo abre una sesión de entrada dentro de una llamada).
-    const showIn = canRoute && (!!a.capture || micSeen.has(a.key) || MIC_APPS.test(a.target));
     const main = a.render || a.capture;
+    const lv = a.render && /\.exe$/i.test(a.target) ? live.get(a.target.replace(/\.exe$/i, '').toLowerCase()) : null;
     return {
       key: a.key, target: a.target, name: a.name, icon: a.icon, canRoute,
-      hasOut: !!a.render, hasIn: !!a.capture, showIn,
-      volume: main.volume, muted: main.muted,
+      hasOut: !!a.render, hasIn: !!a.capture,
+      volume: lv ? lv.volume : main.volume, muted: lv ? lv.muted : main.muted,
       active: a.render ? a.render.active : false,
       micActive: a.capture ? a.capture.active : false,
       out: a.render ? routeInfo(a.key + '|out', a.render, outs, defOut) : null,
-      in: a.capture ? routeInfo(a.key + '|in', a.capture, ins, defIn) : (showIn ? routeInfo(a.key + '|in', { deviceRaw: '' }, ins, defIn) : null),
+      in: a.capture ? routeInfo(a.key + '|in', a.capture, ins, defIn) : null,
     };
   });
   return {
@@ -337,11 +420,13 @@ ipcMain.handle('apps:setDevice', async (_, t, deviceId, kind) => {
   if (deviceId && !validTarget(deviceId)) return;
   const isIn = kind === 'input';
   const fallback = isIn ? 'DefaultCaptureDevice' : 'DefaultRenderDevice';
+  invalidateRows();
   await svcl(['/SetAppDefault', deviceId || fallback, 'all', t]);
   appDevices.set(t.toLowerCase() + (isIn ? '|in' : '|out'), deviceId || 'default');
 });
 ipcMain.handle('apps:setMute', async (_, t, muted) => {
   if (!validTarget(t)) return;
+  invalidateRows();
   if (/\.exe$/i.test(t) && await fastAudio('AM', t, muted ? 1 : 0)) return;
   return svclLatest('appm|' + t.toLowerCase(), [muted ? '/Mute' : '/Unmute', t]);
 });
@@ -460,11 +545,43 @@ const sensorDir = () => path.join(app.getPath('userData'), 'sensores');
 const LHM_URL = 'http://127.0.0.1:8085/data.json';
 
 // CPU: uso total y del núcleo más cargado (los juegos suelen limitarse por un solo hilo)
+// El Administrador de tareas muestra "Utilidad del procesador" (tiene en cuenta la frecuencia real), que no es
+// lo mismo que el tiempo ocupado. Windows lo expone como contador; se lee una vez por segundo con un
+// PowerShell que queda abierto (los nombres de la clase WMI no dependen del idioma de Windows).
+const cpuUtil = { v: null, at: 0, proc: null, startedAt: 0, buf: '' };
+function startCpuUtil() {
+  if (cpuUtil.proc || process.platform !== 'win32' || Date.now() - cpuUtil.startedAt < 15000) return;
+  cpuUtil.startedAt = Date.now();
+  const script = `$ErrorActionPreference = 'SilentlyContinue'
+while ($true) {
+  $v = (Get-CimInstance -ClassName Win32_PerfFormattedData_Counters_ProcessorInformation -Filter "Name='_Total'").PercentProcessorUtility
+  if ($null -ne $v) { try { [Console]::Out.WriteLine('CPU|' + [string]$v); [Console]::Out.Flush() } catch { break } }
+  Start-Sleep -Milliseconds 700
+}`;
+  try {
+    const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+      { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    cpuUtil.proc = proc; cpuUtil.buf = '';
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (d) => {
+      cpuUtil.buf += d;
+      const lines = cpuUtil.buf.split(/\r?\n/);
+      cpuUtil.buf = lines.pop();
+      for (const l of lines) {
+        const m = l.match(/^CPU\|([\d.,]+)/);
+        if (m) { const n = parseFloat(m[1].replace(',', '.')); if (Number.isFinite(n)) { cpuUtil.v = Math.min(100, n); cpuUtil.at = Date.now(); } }
+      }
+    });
+    const gone = () => { if (cpuUtil.proc === proc) { cpuUtil.proc = null; cpuUtil.v = null; } };
+    proc.on('exit', gone); proc.on('error', gone);
+  } catch { cpuUtil.proc = null; }
+}
+
 let cpuPrev = os.cpus().map((c) => ({ ...c.times }));
 let cpuLast = { usage: 0, maxCore: 0 }, cpuLastAt = 0;
 function sampleCpu() {
   const now = Date.now();
-  if (now - cpuLastAt < 400) return cpuLast;
+  if (now - cpuLastAt < 400) { if (cpuUtil.v != null && now - cpuUtil.at < 3000) cpuLast.usage = cpuUtil.v; return cpuLast; }
   const cur = os.cpus();
   let totBusy = 0, totAll = 0, maxCore = 0;
   cur.forEach((c, i) => {
@@ -479,6 +596,8 @@ function sampleCpu() {
   cpuPrev = cur.map((c) => ({ ...c.times }));
   cpuLastAt = now;
   cpuLast = { usage: totAll ? (totBusy / totAll) * 100 : 0, maxCore };
+  startCpuUtil();
+  if (cpuUtil.v != null && now - cpuUtil.at < 3000) cpuLast.usage = cpuUtil.v;
   return cpuLast;
 }
 
@@ -487,7 +606,49 @@ let nvPath = null, nvMissingUntil = 0;
 const toNum = (s) => { const n = parseFloat(s); return Number.isFinite(n) ? n : null; };
 const NV_BASE = 'name,utilization.gpu,temperature.gpu,memory.used,memory.total,fan.speed';
 let nvFields = null; // campos que este controlador acepta (el margen térmico solo existe en controladores nuevos)
+function parseNvLines(lines) {
+  return lines.map((line) => {
+    const p = line.split(',').map((x) => x.trim());
+    const temp = toNum(p[2]);
+    // El controlador informa cuántos grados faltan para que la tarjeta empiece a bajar rendimiento:
+    // temperatura actual + margen = límite real de esta tarjeta.
+    const margin = toNum(p[6]);
+    const lim = temp != null && margin != null && margin > 0 ? temp + margin : null;
+    return { vendor: 'nvidia', name: p[0], usage: toNum(p[1]), temp, tempLimit: lim && lim >= 70 && lim <= 115 ? lim : null,
+             vramUsed: toNum(p[3]), vramTotal: toNum(p[4]), fan: toNum(p[5]), source: 'nvidia-smi' };
+  });
+}
+
+// Una vez que se sabe qué campos acepta el controlador, nvidia-smi se deja abierto midiendo cada 0,5 s:
+// no se abre un proceso nuevo en cada lectura y el dato es siempre reciente.
+const nvStream = { proc: null, latest: null, at: 0, acc: [], count: 0, buf: '', startedAt: 0 };
+function startNvStream() {
+  if (nvStream.proc || !nvPath || !nvFields || !nvStream.count || Date.now() - nvStream.startedAt < 10000) return;
+  nvStream.startedAt = Date.now();
+  try {
+    const proc = spawn(nvPath, [`--query-gpu=${nvFields}`, '--format=csv,noheader,nounits', '-lms', '500'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    nvStream.proc = proc; nvStream.buf = ''; nvStream.acc = [];
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (d) => {
+      nvStream.buf += d;
+      const lines = nvStream.buf.split(/\r?\n/);
+      nvStream.buf = lines.pop();
+      for (const l of lines) {
+        if (!l.trim()) continue;
+        nvStream.acc.push(l);
+        if (nvStream.acc.length >= nvStream.count) {
+          nvStream.latest = parseNvLines(nvStream.acc.slice(-nvStream.count));
+          nvStream.at = Date.now(); nvStream.acc = [];
+        }
+      }
+    });
+    const gone = () => { if (nvStream.proc === proc) { nvStream.proc = null; nvStream.latest = null; } };
+    proc.on('exit', gone); proc.on('error', gone);
+  } catch { nvStream.proc = null; }
+}
+
 async function readNvidia() {
+  if (nvStream.latest && Date.now() - nvStream.at < 3000) return nvStream.latest;
   if (Date.now() < nvMissingUntil) return [];
   const cands = nvPath ? [nvPath] : [
     'nvidia-smi',
@@ -502,17 +663,9 @@ async function readNvidia() {
           { windowsHide: true, timeout: 3000 }, (e, so) => (e ? rej(e) : res(so))));
         const lines = String(out).split(/\r?\n/).filter((l) => l.trim());
         if (!lines.length) continue;
-        nvPath = c; nvFields = fields;
-        return lines.map((line) => {
-          const p = line.split(',').map((x) => x.trim());
-          const temp = toNum(p[2]);
-          // El controlador informa cuántos grados faltan para que la tarjeta empiece a bajar rendimiento:
-          // temperatura actual + margen = límite real de esta tarjeta.
-          const margin = toNum(p[6]);
-          const lim = temp != null && margin != null && margin > 0 ? temp + margin : null;
-          return { vendor: 'nvidia', name: p[0], usage: toNum(p[1]), temp, tempLimit: lim && lim >= 70 && lim <= 115 ? lim : null,
-                   vramUsed: toNum(p[3]), vramTotal: toNum(p[4]), fan: toNum(p[5]), source: 'nvidia-smi' };
-        });
+        nvPath = c; nvFields = fields; nvStream.count = lines.length;
+        startNvStream();
+        return parseNvLines(lines);
       } catch {}
     }
   }
@@ -1050,11 +1203,29 @@ function toggleWindow() {
   } else showWindow();
 }
 
+// Usa la posición guardada solo si cabe entera en una pantalla que sigue conectada y no es enorme.
+// Si no (primera vez, pantalla desconectada, ventana a caballo entre dos pantallas), abre un tamaño moderado
+// centrado en la pantalla donde está el cursor.
+function pickBounds() {
+  const b = settings.bounds;
+  const ok = b && Number.isFinite(b.x) && Number.isFinite(b.y) && b.width >= 360 && b.height >= 360 &&
+    screen.getAllDisplays().some((d) => {
+      const w = d.workArea;
+      return b.x >= w.x && b.y >= w.y && b.x + b.width <= w.x + w.width && b.y + b.height <= w.y + w.height &&
+        b.width <= w.width * 0.9 && b.height <= w.height * 0.9;
+    });
+  if (ok) return { x: b.x, y: b.y, width: b.width, height: b.height };
+  const w = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+  const width = Math.min(900, Math.round(w.width * 0.7));
+  const height = Math.min(620, Math.round(w.height * 0.8));
+  return { width, height, x: w.x + Math.round((w.width - width) / 2), y: w.y + Math.round((w.height - height) / 2) };
+}
+
 function createWindow() {
-  const b = settings.bounds || {};
+  const b = pickBounds();
   win = new BrowserWindow({
-    width: b.width || 960,
-    height: b.height || 640,
+    width: b.width,
+    height: b.height,
     x: b.x,
     y: b.y,
     minWidth: 360,
@@ -1077,6 +1248,18 @@ function createWindow() {
     if (startHidden) { win.showInactive(); win.minimize(); } // arranque con Windows: queda en la barra de tareas
     else win.show();
   });
+
+  // Se recuerda la posición y el tamaño en cuanto se mueve o se cambia de tamaño (no solo al cerrar).
+  let boundsTimer = null;
+  const rememberBounds = () => {
+    clearTimeout(boundsTimer);
+    boundsTimer = setTimeout(() => {
+      if (!win || win.isDestroyed() || win.isMinimized() || win.isMaximized() || win.isFullScreen()) return;
+      settings.bounds = win.getNormalBounds(); saveSettings();
+    }, 600);
+  };
+  win.on('resize', rememberBounds);
+  win.on('move', rememberBounds);
 
   win.on('focus', () => win.webContents.send('ui:shown'));
   win.on('restore', () => win.webContents.send('ui:shown'));
@@ -1191,5 +1374,7 @@ if (!app.requestSingleInstanceLock()) {
     globalShortcut.unregisterAll();
     if (hsProc) { try { hsProc.kill(); } catch {} }
     if (fa.proc) { try { fa.proc.kill(); } catch {} }
+    if (nvStream.proc) { try { nvStream.proc.kill(); } catch {} }
+    if (cpuUtil.proc) { try { cpuUtil.proc.kill(); } catch {} }
   });
 }
