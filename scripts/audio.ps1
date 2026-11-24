@@ -158,13 +158,21 @@ public static class Aud {
     return WithEndpoint(id, v => v.SetMute(mute, ref Ctx)) == 0 ? "OK" : "ERR";
   }
 
-  // Recorre las sesiones de audio de salida (apps) y aplica la acción a las de ese .exe.
-  static int EachSession(string exe, Func<ISimpleAudioVolume, int> act) {
-    string want = (exe ?? "").Trim();
-    if (want.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) want = want.Substring(0, want.Length - 4);
-    int hit = 0;
+  static Dictionary<uint, string> pn = new Dictionary<uint, string>();
+  static DateTime pnAt = DateTime.UtcNow;
+  static string ProcName(uint pid) {
+    if ((DateTime.UtcNow - pnAt).TotalSeconds > 10) { pn.Clear(); pnAt = DateTime.UtcNow; }
+    string name;
+    if (pn.TryGetValue(pid, out name)) return name;
+    try { name = Process.GetProcessById((int)pid).ProcessName; } catch { return null; }
+    pn[pid] = name;
+    return name;
+  }
+
+  // Recorre las sesiones de audio de salida (apps) de todos los dispositivos activos.
+  static void ForSessions(Func<string, ISimpleAudioVolume, bool> cb) {
     IMMDeviceCollection col;
-    if (Enum().EnumAudioEndpoints(0, 1, out col) != 0 || col == null) return 0;
+    if (Enum().EnumAudioEndpoints(0, 1, out col) != 0 || col == null) return;
     int n; col.GetCount(out n);
     for (int i = 0; i < n; i++) {
       try {
@@ -179,15 +187,62 @@ public static class Aud {
           IAudioSessionControl2 c;
           if (se.GetSession(k, out c) != 0 || c == null) continue;
           uint pid; if (c.GetProcessId(out pid) != 0 || pid == 0) continue;
-          string name;
-          try { name = Process.GetProcessById((int)pid).ProcessName; } catch { continue; }
-          if (!string.Equals(name, want, StringComparison.OrdinalIgnoreCase)) continue;
-          ISimpleAudioVolume sv = (ISimpleAudioVolume)c;
-          if (act(sv) == 0) hit++;
+          string name = ProcName(pid);
+          if (name == null) continue;
+          cb(name, (ISimpleAudioVolume)c);
         }
       } catch { }
     }
+  }
+
+  static int EachSession(string exe, Func<ISimpleAudioVolume, int> act) {
+    string want = (exe ?? "").Trim();
+    if (want.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) want = want.Substring(0, want.Length - 4);
+    int hit = 0;
+    ForSessions((name, sv) => {
+      if (string.Equals(name, want, StringComparison.OrdinalIgnoreCase) && act(sv) == 0) hit++;
+      return true;
+    });
     return hit;
+  }
+
+  // Volumen y silencio actuales de cada dispositivo (ids separados por |): "pct,mute;pct,mute;..."
+  public static string EGM(string ids) {
+    List<string> parts = new List<string>();
+    foreach (string id in (ids ?? "").Split('|')) {
+      string r = "x";
+      if (id.Length > 0) {
+        WithEndpoint(id, v => {
+          float f; bool m;
+          int hr = v.GetMasterVolumeLevelScalar(out f);
+          if (hr != 0) return hr;
+          v.GetMute(out m);
+          r = ((int)Math.Round(f * 100)).ToString() + "," + (m ? "1" : "0");
+          return 0;
+        });
+      }
+      parts.Add(r);
+    }
+    return "OK\t" + string.Join(";", parts.ToArray());
+  }
+
+  // Volumen y silencio actuales de cada app: "nombre=pct,mute;..." (volumen más alto; silenciada solo si todas lo están)
+  public static string AL() {
+    Dictionary<string, float> vol = new Dictionary<string, float>();
+    Dictionary<string, bool> mut = new Dictionary<string, bool>();
+    ForSessions((name, sv) => {
+      float v; bool m;
+      if (sv.GetMasterVolume(out v) != 0) return true;
+      sv.GetMute(out m);
+      string k = name.ToLowerInvariant();
+      if (!vol.ContainsKey(k)) { vol[k] = v; mut[k] = m; }
+      else { if (v > vol[k]) vol[k] = v; mut[k] = mut[k] && m; }
+      return true;
+    });
+    List<string> parts = new List<string>();
+    foreach (KeyValuePair<string, float> kv in vol)
+      parts.Add(kv.Key + "=" + ((int)Math.Round(kv.Value * 100)).ToString() + "," + (mut[kv.Key] ? "1" : "0"));
+    return "OK\t" + string.Join(";", parts.ToArray());
   }
 
   public static string AV(string exe, int pct) {
@@ -198,7 +253,6 @@ public static class Aud {
     return EachSession(exe, s => s.SetMute(mute, ref Ctx)) > 0 ? "OK" : "ERR";
   }
 }
-
 '@
 
 try {
@@ -229,6 +283,8 @@ while ($true) {
       'EM' { $r = [Aud]::EM($arg, ($n -ne 0)) }
       'AV' { $r = [Aud]::AV($arg, $n) }
       'AM' { $r = [Aud]::AM($arg, ($n -ne 0)) }
+      'EGM' { $r = [Aud]::EGM($arg) }
+      'AL' { $r = [Aud]::AL() }
     }
   } catch { $r = 'ERR' }
   [Console]::Out.WriteLine($p[0] + "`t" + $r)
