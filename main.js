@@ -577,6 +577,7 @@ while ($true) {
   } catch { cpuUtil.proc = null; }
 }
 
+let cpuRaw = 0;
 let cpuPrev = os.cpus().map((c) => ({ ...c.times }));
 let cpuLast = { usage: 0, maxCore: 0 }, cpuLastAt = 0;
 function sampleCpu() {
@@ -596,6 +597,7 @@ function sampleCpu() {
   cpuPrev = cur.map((c) => ({ ...c.times }));
   cpuLastAt = now;
   cpuLast = { usage: totAll ? (totBusy / totAll) * 100 : 0, maxCore };
+  cpuRaw = cpuLast.usage;
   startCpuUtil();
   if (cpuUtil.v != null && now - cpuUtil.at < 3000) cpuLast.usage = cpuUtil.v;
   return cpuLast;
@@ -1149,6 +1151,42 @@ async function buildDiag() {
   const fj = readJsonFile(path.join(dir, 'fans.json'));
   L.push('', '── Ventiladores por WMI (Lenovo) ──');
   L.push(fj ? `${fj.note}${fj.raw ? ' · respuesta: ' + fj.raw : ''} · detectados: ${(fj.fans || []).map((f) => `${f.name}=${f.rpm}`).join(', ') || 'ninguno'}` : 'fans.json: no existe todavía');
+
+  L.push('', '── Fuentes de uso (compáralas AL MISMO TIEMPO con el Administrador de tareas) ──');
+  L.push(`CPU, tiempo ocupado (lo que dio la 1.0.5 y antes): ${cpuRaw.toFixed(1)} %`);
+  L.push(`CPU, utilidad del procesador (contador de Windows, como el Administrador de tareas): ${cpuUtil.v != null ? cpuUtil.v.toFixed(1) + ' %  (hace ' + ago(cpuUtil.at) + ')' : 'SIN DATO'} · ayudante ${cpuUtil.proc ? 'corriendo' : 'detenido'}`);
+  L.push(`CPU, lo que muestra la app ahora: ${cpuLast.usage.toFixed(1)} %`);
+  const nvl = nvStream.latest || [];
+  L.push(`GPU NVIDIA (nvidia-smi, flujo ${nvStream.proc ? 'activo' : 'detenido'}): ${nvl.length ? nvl.map((g) => `${g.usage} % uso, ${g.temp} °C, VRAM ${g.vramUsed}/${g.vramTotal} MB`).join(' | ') + ' (hace ' + ago(nvStream.at) + ')' : 'SIN DATO'}`);
+  L.push(`RAM: usada ${((os.totalmem() - os.freemem()) / 1073741824).toFixed(1)} GB de ${(os.totalmem() / 1073741824).toFixed(1)} GB (disponible ${(os.freemem() / 1073741824).toFixed(1)} GB)`);
+  try {
+    const eng = await new Promise((resolve) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', psEncoded(`$s=@{}
+Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction SilentlyContinue | ForEach-Object {
+  if ($_.Name -match 'luid_(0x[0-9a-f]+_0x[0-9a-f]+)_phys_(\d+)_eng_(\d+)_engtype_(.+)$') { $k = $matches[1] + ' ' + $matches[4] + ' #' + $matches[3]; $s[$k] = [double]$s[$k] + [double]$_.UtilizationPercentage }
+}
+$s.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 5 | ForEach-Object { $_.Key + ' = ' + [math]::Round($_.Value,1) + ' %' }`)],
+      { windowsHide: true, timeout: 8000 }, (err, so) => resolve(err ? '' : String(so).trim().replace(/\r?\n/g, ' | '))));
+    L.push(`GPU, motores más ocupados según Windows (el Administrador de tareas muestra el más alto): ${eng || 'SIN DATO'}`);
+  } catch {}
+
+  L.push('', '── Micrófono por aplicación ──');
+  try {
+    const rows = await getRows(0);
+    const mic = await readMicUse();
+    const h = rows[0].map((x) => x.trim().toLowerCase());
+    const iType = h.indexOf('type'), iDir = h.indexOf('direction'), iState = h.indexOf('device state'), iName = h.indexOf('name'), iPath = h.indexOf('process path');
+    let n = 0;
+    for (const r of rows.slice(1)) {
+      if (!/^application$/i.test((r[iType] || '').trim()) || !/capture/i.test(r[iDir] || '')) continue;
+      const pp = iPath >= 0 ? (r[iPath] || '').trim() : '';
+      const exe = pp ? path.win32.basename(pp) : (r[iName] || '').trim();
+      const reg = mic.has(exe.toLowerCase()) ? (mic.get(exe.toLowerCase()) ? 'Windows dice: EN USO' : 'Windows dice: sin uso') : 'Windows: sin registro';
+      L.push(`${exe} · sesión de entrada: ${(r[iState] || '').trim()} · ${reg}`);
+      n++;
+    }
+    if (!n) L.push('Ninguna aplicación tiene sesión de entrada ahora mismo.');
+    L.push(`Programas con registro de micrófono en Windows: ${[...mic.keys()].slice(0, 12).join(', ') || '(ninguno; no se pudo leer)'}`);
+  } catch (e) { L.push('No se pudo leer: ' + e.message); }
 
   L.push('', '── Volumen del micrófono: bajadas que NO hizo esta app ──');
   if (!micWatch.log.length) L.push('Ninguna detectada desde que se abrió la app (vigila cada 5 s).');
