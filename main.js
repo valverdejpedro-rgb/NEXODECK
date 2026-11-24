@@ -10,7 +10,11 @@ const LOGIN_ARGS = ['--hidden'];
 const startHidden = process.argv.includes('--hidden');
 
 let win = null;
-const appDevices = new Map();
+const appDevices = new Map();   // "programa.exe|in" / "programa.exe|out" -> id del dispositivo elegido o 'default'
+const appDeviceAt = new Map();  // cuándo se eligió (para no mostrar un valor viejo mientras Windows aplica el cambio)
+const devKind = new Map();      // id de dispositivo -> 'input' | 'output'
+const lastDef = { input: null, output: null };
+function persistAppDevices() { settings.appDevices = Object.fromEntries(appDevices); saveSettings(); }
 let csvSeq = 0;
 let tray = null;
 let quitting = false;
@@ -38,6 +42,14 @@ let queue = Promise.resolve();
 function svcl(args) {
   const p = queue.then(() => execSvcl(args));
   queue = p.catch(() => {});
+  return p;
+}
+
+// Los cambios (dispositivo, silencio) van en su propia cola: no esperan a que termine una lectura completa de svcl.
+let setQueue = Promise.resolve();
+function svclSet(args) {
+  const p = setQueue.then(() => execSvcl(args));
+  setQueue = p.catch(() => {});
   return p;
 }
 
@@ -162,6 +174,7 @@ async function getRows(maxAge = 2500) {
   return refreshRows();
 }
 function invalidateRows() { rc.rows = null; rc.gen++; rc.p = null; }
+function staleRows() { rc.at = 0; }   // se renueva en segundo plano, sin hacer esperar a nadie
 
 async function readItems() {
   const tmp = path.join(os.tmpdir(), `centro-control-${process.pid}-${++csvSeq}.csv`);
@@ -195,6 +208,7 @@ async function listDevices(preRows) {
     const devName = iDev >= 0 ? (r[iDev] || '').trim() : '';
     const cid = (r[iId] || '').trim();
     if (iItem >= 0 && cid) itemIds.set(cid, (r[iItem] || '').trim());
+    if (cid) devKind.set(cid, kind);
     out[kind].push({
       id: cid,
       base: name,
@@ -211,8 +225,18 @@ async function listDevices(preRows) {
 const validId = (id) => typeof id === 'string' && id.length > 0 && id.length < 500;
 
 // Volumen y silencio en vivo (directo de Windows, en milisegundos) sobre la lista de dispositivos.
+const guidOf = (x) => ((x || '').match(/\{[0-9a-f-]{36}\}\s*$/i) || [''])[0].toLowerCase();
 async function overlayDevices(st) {
   const all = [...st.output, ...st.input];
+  // Predeterminados de Windows en este instante (así el selector cambia al momento, sin esperar a svcl).
+  const dr = await fastCall('DEFS', '-', 0);
+  if (dr && dr.ok) {
+    const [rid, cid] = dr.payload.split(';');
+    for (const [list, want] of [[st.output, guidOf(rid)], [st.input, guidOf(cid)]]) {
+      if (!want || !list.some((d) => guidOf(itemIds.get(d.id)) === want)) continue;
+      for (const d of list) d.isDefault = guidOf(itemIds.get(d.id)) === want;
+    }
+  }
   const ids = all.map((d) => itemIds.get(d.id) || '');
   if (!ids.some(Boolean)) return;
   const r = await fastCall('EGM', ids.join('|'), 0);
@@ -225,6 +249,7 @@ async function overlayDevices(st) {
 ipcMain.handle('audio:state', async () => {
   const st = await listDevices();
   await overlayDevices(st);
+  checkDefaults(st);
   return st;
 });
 ipcMain.handle('audio:setVolume', async (_, id, pct) => {
@@ -243,7 +268,20 @@ ipcMain.handle('audio:toggleMute', async (_, id, muted) => {
   }
   return svcl(['/Switch', id]);
 });
-ipcMain.handle('audio:setDefault', (_, id) => { if (!validId(id)) return; micWatch.lastDefSetAt = Date.now(); invalidateRows(); return svcl(['/SetDefault', id, 'all']); });
+ipcMain.handle('audio:setDefault', async (_, id) => {
+  if (!validId(id)) return;
+  micWatch.lastDefSetAt = Date.now();
+  const kind = devKind.get(id);
+  // Camino rápido: se cambia directo en Windows (milisegundos). svcl.exe queda de respaldo.
+  if (await fastAudio('SD', itemIds.get(id), 0)) {
+    if (kind) { lastDef[kind] = id; followDefaults(kind).catch(() => {}); }
+    staleRows();
+    return;
+  }
+  invalidateRows();
+  await svclSet(['/SetDefault', id, 'all']);
+  if (kind) { lastDef[kind] = id; await followDefaults(kind); }
+});
 
 /* ---------- Audio por aplicación ---------- */
 
@@ -310,6 +348,7 @@ async function listApps() {
   const rows = await getRows();
   const live = await liveApps().catch(() => new Map());
   const all = await listDevices(rows);
+  await overlayDevices(all);
   const outs = all.output, ins = all.input;
   const header = rows[0].map((h) => h.trim().toLowerCase());
   const col = (n) => header.indexOf(n);
@@ -392,6 +431,8 @@ function routeInfo(storeKey, sess, devs, defId) {
   let pending = false;
   if (stored === 'default') { deviceId = ''; pending = !!detected && detected !== defId; }
   else if (storedId && detected && detected !== storedId) pending = true;
+  const at = appDeviceAt.get(storeKey);
+  if (stored && at && Date.now() - at < 6000) deviceId = stored === 'default' ? '' : storedId;
   return { deviceId, deviceRaw: sess.deviceRaw, pending };
 }
 
@@ -421,10 +462,36 @@ ipcMain.handle('apps:setDevice', async (_, t, deviceId, kind) => {
   if (deviceId && !validTarget(deviceId)) return;
   const isIn = kind === 'input';
   const fallback = isIn ? 'DefaultCaptureDevice' : 'DefaultRenderDevice';
-  invalidateRows();
-  await svcl(['/SetAppDefault', deviceId || fallback, 'all', t]);
-  appDevices.set(t.toLowerCase() + (isIn ? '|in' : '|out'), deviceId || 'default');
+  const key = t.toLowerCase() + (isIn ? '|in' : '|out');
+  // Se recuerda la intención primero: así "Predeterminado del sistema" se sigue aplicando aunque cambie después.
+  appDevices.set(key, deviceId || 'default');
+  appDeviceAt.set(key, Date.now());
+  persistAppDevices();
+  try { await svclSet(['/SetAppDefault', deviceId || fallback, 'all', t]); }
+  catch { await svclSet(['/SetAppDefault', deviceId || fallback, 'all', t]); }
+  staleRows();
 });
+
+// "Predeterminado del sistema" en una app = que siga al dispositivo predeterminado de Windows.
+// Windows no siempre lo hace solo con lo que fija svcl, así que cuando cambia el predeterminado
+// (desde el Centro de Control o desde Windows) se vuelve a aplicar a las apps que dejaste así.
+async function followDefaults(kind) {
+  const suffix = kind === 'input' ? '|in' : '|out';
+  const name = kind === 'input' ? 'DefaultCaptureDevice' : 'DefaultRenderDevice';
+  let n = 0;
+  for (const [k, v] of [...appDevices]) {
+    if (v !== 'default' || !k.endsWith(suffix)) continue;
+    try { await svclSet(['/SetAppDefault', name, 'all', k.slice(0, -suffix.length)]); n++; } catch {}
+  }
+  if (n) staleRows();
+}
+function checkDefaults(st) {
+  for (const kind of ['input', 'output']) {
+    const d = (st[kind] || []).find((x) => x.isDefault);
+    if (!d) continue;
+    if (lastDef[kind] !== d.id) { lastDef[kind] = d.id; followDefaults(kind).catch(() => {}); }
+  }
+}
 ipcMain.handle('apps:setMute', async (_, t, muted) => {
   if (!validTarget(t)) return;
   invalidateRows();
@@ -482,7 +549,10 @@ async function micWatchTick() {
   micWatch.busy = true;
   try {
     const rows = await readItems();
-    const def = (await listDevices(rows)).input.find((d) => d.isDefault);
+    const stAll = await listDevices(rows);
+    await overlayDevices(stAll);
+    checkDefaults(stAll);
+    const def = stAll.input.find((d) => d.isDefault);
     if (!def) { micWatch.id = ''; micWatch.vol = null; return; }
     if (def.id !== micWatch.id) {
       if (micWatch.id && Date.now() - micWatch.lastDefSetAt > 8000) {
@@ -1437,6 +1507,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     settings = loadSettings();
+    for (const [k, v] of Object.entries(settings.appDevices || {})) if (typeof v === 'string') appDevices.set(k, v);
     createWindow();
     createTray();
     setupUpdater();

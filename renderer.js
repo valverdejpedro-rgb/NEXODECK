@@ -40,6 +40,12 @@ function render(state) {
   for (const kind of KINDS) {
     const p = panels[kind];
     p.devices = state[kind] || [];
+    // Mientras Windows confirma el cambio, se sigue mostrando el dispositivo que acabas de elegir.
+    if (p.want) {
+      const cur = p.devices.find((d) => d.isDefault);
+      if (Date.now() > p.want.until || (cur && cur.id === p.want.id)) p.want = null;
+      else if (p.devices.some((d) => d.id === p.want.id)) p.devices = p.devices.map((d) => ({ ...d, isDefault: d.id === p.want.id }));
+    }
     p.current = p.devices.find((d) => d.isDefault) || p.devices[0] || null;
 
     const sig = p.devices.map((d) => d.id + '|' + d.name + '|' + d.isDefault).join('\n');
@@ -166,7 +172,16 @@ for (const kind of KINDS) {
   });
 
   p.select.addEventListener('change', () => {
-    act(() => window.api.setDefault(p.select.value));
+    const id = p.select.value;
+    p.want = { id, until: Date.now() + 3000 };
+    const d = p.devices.find((x) => x.id === id);
+    if (d) {                                   // se refleja al instante, sin esperar a Windows
+      p.current = d;
+      p.el.classList.toggle('muted', d.muted);
+      p.mute.setAttribute('aria-pressed', String(d.muted));
+      if (!p.dragging) { p.slider.value = d.volume; paintSlider(p, d.volume); }
+    }
+    act(() => window.api.setDefault(id));
   });
 }
 
@@ -277,7 +292,13 @@ function paintApp(row, value) {
 
 async function actApps(fn) {
   appsBusy++;
-  try { await fn(); } catch {} finally { appsBusy--; }
+  let failed = false;
+  try { await fn(); } catch { failed = true; } finally { appsBusy--; }
+  if (failed) {
+    appsErrorEl.hidden = false;
+    appsErrorEl.textContent = 'No se pudo aplicar el cambio. Inténtalo de nuevo.';
+    setTimeout(() => { appsErrorEl.hidden = true; }, 4000);
+  }
   setTimeout(refreshApps, 250);
 }
 
@@ -340,8 +361,9 @@ function makeAppRow() {
     row.state.textContent = appStateText(row);
     actApps(() => window.api.setAppMute(row.target, next));
   });
-  row.outSelect.addEventListener('change', () => actApps(() => window.api.setAppDevice(row.target, row.outSelect.value, 'output')));
-  row.inSelect.addEventListener('change', () => actApps(() => window.api.setAppDevice(row.target, row.inSelect.value, 'input')));
+  // Al elegir se quita el foco del selector: así la lista vuelve a seguir lo que informa Windows.
+  row.outSelect.addEventListener('change', () => { const v = row.outSelect.value; row.outSelect.blur(); actApps(() => window.api.setAppDevice(row.target, v, 'output')); });
+  row.inSelect.addEventListener('change', () => { const v = row.inSelect.value; row.inSelect.blur(); actApps(() => window.api.setAppDevice(row.target, v, 'input')); });
   return row;
 }
 
