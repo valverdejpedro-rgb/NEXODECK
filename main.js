@@ -1162,7 +1162,7 @@ async function buildDiag() {
   try {
     const eng = await new Promise((resolve) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', psEncoded(`$s=@{}
 Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction SilentlyContinue | ForEach-Object {
-  if ($_.Name -match 'luid_(0x[0-9a-f]+_0x[0-9a-f]+)_phys_(\d+)_eng_(\d+)_engtype_(.+)$') { $k = $matches[1] + ' ' + $matches[4] + ' #' + $matches[3]; $s[$k] = [double]$s[$k] + [double]$_.UtilizationPercentage }
+  if ($_.Name -match 'luid_(0x[0-9a-f]+_0x[0-9a-f]+)_phys_(\\d+)_eng_(\\d+)_engtype_(.+)$') { $k = $matches[1] + ' ' + $matches[4] + ' #' + $matches[3]; $s[$k] = [double]$s[$k] + [double]$_.UtilizationPercentage }
 }
 $s.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 5 | ForEach-Object { $_.Key + ' = ' + [math]::Round($_.Value,1) + ' %' }`)],
       { windowsHide: true, timeout: 8000 }, (err, so) => resolve(err ? '' : String(so).trim().replace(/\r?\n/g, ' | '))));
