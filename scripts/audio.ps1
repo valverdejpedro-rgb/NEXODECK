@@ -1,0 +1,236 @@
+﻿# Ayudante de audio rápido de Centro de Control (no necesita administrador).
+# Se queda abierto y recibe órdenes por la entrada estándar (volumen y silencio de dispositivos y de apps)
+# usando la API de audio de Windows directamente: el cambio es inmediato, sin abrir svcl.exe cada vez.
+# Se cierra solo cuando se cierra la app (la entrada estándar se cierra).
+$ErrorActionPreference = 'SilentlyContinue'
+if (-not [Environment]::Is64BitProcess) { exit 1 }
+
+$src = @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
+
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+class MMDeviceEnumeratorCom { }
+
+[ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDeviceEnumerator {
+  [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IMMDeviceCollection devices);
+  [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
+  [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
+  [PreserveSig] int RegisterEndpointNotificationCallback(IntPtr client);
+  [PreserveSig] int UnregisterEndpointNotificationCallback(IntPtr client);
+}
+
+[ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDeviceCollection {
+  [PreserveSig] int GetCount(out int count);
+  [PreserveSig] int Item(int index, out IMMDevice device);
+}
+
+[ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDevice {
+  [PreserveSig] int Activate(ref Guid iid, int clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
+  [PreserveSig] int OpenPropertyStore(int access, out IntPtr props);
+  [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+  [PreserveSig] int GetState(out int state);
+}
+
+[ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioEndpointVolume {
+  [PreserveSig] int RegisterControlChangeNotify(IntPtr notify);
+  [PreserveSig] int UnregisterControlChangeNotify(IntPtr notify);
+  [PreserveSig] int GetChannelCount(out uint count);
+  [PreserveSig] int SetMasterVolumeLevel(float db, ref Guid ctx);
+  [PreserveSig] int SetMasterVolumeLevelScalar(float level, ref Guid ctx);
+  [PreserveSig] int GetMasterVolumeLevel(out float db);
+  [PreserveSig] int GetMasterVolumeLevelScalar(out float level);
+  [PreserveSig] int SetChannelVolumeLevel(uint ch, float db, ref Guid ctx);
+  [PreserveSig] int SetChannelVolumeLevelScalar(uint ch, float level, ref Guid ctx);
+  [PreserveSig] int GetChannelVolumeLevel(uint ch, out float db);
+  [PreserveSig] int GetChannelVolumeLevelScalar(uint ch, out float level);
+  [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, ref Guid ctx);
+  [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
+}
+
+[ComImport, Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioSessionManager2 {
+  [PreserveSig] int GetAudioSessionControl(IntPtr g, uint flags, out IntPtr ctl);
+  [PreserveSig] int GetSimpleAudioVolume(IntPtr g, uint flags, out IntPtr vol);
+  [PreserveSig] int GetSessionEnumerator(out IAudioSessionEnumerator e);
+}
+
+[ComImport, Guid("E2F5BB11-0570-40CA-ACDD-3AA01277DEE8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioSessionEnumerator {
+  [PreserveSig] int GetCount(out int count);
+  [PreserveSig] int GetSession(int index, out IAudioSessionControl2 session);
+}
+
+[ComImport, Guid("BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioSessionControl2 {
+  [PreserveSig] int GetState(out int state);
+  [PreserveSig] int GetDisplayName([MarshalAs(UnmanagedType.LPWStr)] out string name);
+  [PreserveSig] int SetDisplayName([MarshalAs(UnmanagedType.LPWStr)] string name, ref Guid ctx);
+  [PreserveSig] int GetIconPath([MarshalAs(UnmanagedType.LPWStr)] out string path);
+  [PreserveSig] int SetIconPath([MarshalAs(UnmanagedType.LPWStr)] string path, ref Guid ctx);
+  [PreserveSig] int GetGroupingParam(out Guid g);
+  [PreserveSig] int SetGroupingParam(ref Guid g, ref Guid ctx);
+  [PreserveSig] int RegisterAudioSessionNotification(IntPtr n);
+  [PreserveSig] int UnregisterAudioSessionNotification(IntPtr n);
+  [PreserveSig] int GetSessionIdentifier([MarshalAs(UnmanagedType.LPWStr)] out string id);
+  [PreserveSig] int GetSessionInstanceIdentifier([MarshalAs(UnmanagedType.LPWStr)] out string id);
+  [PreserveSig] int GetProcessId(out uint pid);
+  [PreserveSig] int IsSystemSoundsSession();
+  [PreserveSig] int SetDuckingPreference([MarshalAs(UnmanagedType.Bool)] bool optOut);
+}
+
+[ComImport, Guid("87CE5498-68D6-44E5-9215-6DA47EF883D8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface ISimpleAudioVolume {
+  [PreserveSig] int SetMasterVolume(float level, ref Guid ctx);
+  [PreserveSig] int GetMasterVolume(out float level);
+  [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, ref Guid ctx);
+  [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
+}
+
+public static class Aud {
+  static readonly Guid IID_EndpointVolume = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+  static readonly Guid IID_SessionManager2 = new Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
+  static Guid Ctx = Guid.Empty;
+  static IMMDeviceEnumerator en;
+  static Dictionary<string, IAudioEndpointVolume> cache = new Dictionary<string, IAudioEndpointVolume>();
+
+  static IMMDeviceEnumerator Enum() {
+    if (en == null) en = (IMMDeviceEnumerator)(new MMDeviceEnumeratorCom());
+    return en;
+  }
+
+  // Busca el dispositivo por su id completo; si no coincide, por el GUID final ({...}).
+  static IMMDevice FindDevice(string id) {
+    IMMDevice d;
+    if (Enum().GetDevice(id, out d) == 0 && d != null) return d;
+    Match m = Regex.Match(id ?? "", @"\{[0-9a-fA-F-]{36}\}\s*$");
+    if (!m.Success) return null;
+    for (int flow = 0; flow < 2; flow++) {
+      IMMDeviceCollection col;
+      if (Enum().EnumAudioEndpoints(flow, 1, out col) != 0 || col == null) continue;
+      int n; col.GetCount(out n);
+      for (int i = 0; i < n; i++) {
+        IMMDevice dev; if (col.Item(i, out dev) != 0 || dev == null) continue;
+        string did; dev.GetId(out did);
+        if (did != null && did.EndsWith(m.Value, StringComparison.OrdinalIgnoreCase)) return dev;
+      }
+    }
+    return null;
+  }
+
+  static IAudioEndpointVolume Endpoint(string id) {
+    IAudioEndpointVolume v;
+    if (cache.TryGetValue(id, out v)) return v;
+    IMMDevice d = FindDevice(id);
+    if (d == null) return null;
+    object o; Guid iid = IID_EndpointVolume;
+    if (d.Activate(ref iid, 23, IntPtr.Zero, out o) != 0 || o == null) return null;
+    v = (IAudioEndpointVolume)o;
+    cache[id] = v;
+    return v;
+  }
+
+  static int WithEndpoint(string id, Func<IAudioEndpointVolume, int> act) {
+    for (int attempt = 0; attempt < 2; attempt++) {
+      try {
+        IAudioEndpointVolume v = Endpoint(id);
+        if (v == null) return -1;
+        int hr = act(v);
+        if (hr == 0) return 0;
+      } catch { }
+      cache.Remove(id); // el dispositivo cambió: se vuelve a buscar
+    }
+    return -1;
+  }
+
+  public static string EV(string id, int pct) {
+    float f = Math.Max(0, Math.Min(100, pct)) / 100f;
+    return WithEndpoint(id, v => v.SetMasterVolumeLevelScalar(f, ref Ctx)) == 0 ? "OK" : "ERR";
+  }
+  public static string EM(string id, bool mute) {
+    return WithEndpoint(id, v => v.SetMute(mute, ref Ctx)) == 0 ? "OK" : "ERR";
+  }
+
+  // Recorre las sesiones de audio de salida (apps) y aplica la acción a las de ese .exe.
+  static int EachSession(string exe, Func<ISimpleAudioVolume, int> act) {
+    string want = (exe ?? "").Trim();
+    if (want.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) want = want.Substring(0, want.Length - 4);
+    int hit = 0;
+    IMMDeviceCollection col;
+    if (Enum().EnumAudioEndpoints(0, 1, out col) != 0 || col == null) return 0;
+    int n; col.GetCount(out n);
+    for (int i = 0; i < n; i++) {
+      try {
+        IMMDevice dev; if (col.Item(i, out dev) != 0 || dev == null) continue;
+        object o; Guid iid = IID_SessionManager2;
+        if (dev.Activate(ref iid, 23, IntPtr.Zero, out o) != 0 || o == null) continue;
+        IAudioSessionManager2 mgr = (IAudioSessionManager2)o;
+        IAudioSessionEnumerator se;
+        if (mgr.GetSessionEnumerator(out se) != 0 || se == null) continue;
+        int cnt; se.GetCount(out cnt);
+        for (int k = 0; k < cnt; k++) {
+          IAudioSessionControl2 c;
+          if (se.GetSession(k, out c) != 0 || c == null) continue;
+          uint pid; if (c.GetProcessId(out pid) != 0 || pid == 0) continue;
+          string name;
+          try { name = Process.GetProcessById((int)pid).ProcessName; } catch { continue; }
+          if (!string.Equals(name, want, StringComparison.OrdinalIgnoreCase)) continue;
+          ISimpleAudioVolume sv = (ISimpleAudioVolume)c;
+          if (act(sv) == 0) hit++;
+        }
+      } catch { }
+    }
+    return hit;
+  }
+
+  public static string AV(string exe, int pct) {
+    float f = Math.Max(0, Math.Min(100, pct)) / 100f;
+    return EachSession(exe, s => s.SetMasterVolume(f, ref Ctx)) > 0 ? "OK" : "ERR";
+  }
+  public static string AM(string exe, bool mute) {
+    return EachSession(exe, s => s.SetMute(mute, ref Ctx)) > 0 ? "OK" : "ERR";
+  }
+}
+
+'@
+
+try {
+  Add-Type -TypeDefinition $src -Language CSharp -ErrorAction Stop
+} catch {
+  [Console]::Out.WriteLine("FAIL`tcompilacion")
+  [Console]::Out.Flush()
+  exit 1
+}
+
+[Console]::Out.WriteLine("READY")
+[Console]::Out.Flush()
+
+function Dec([string]$b) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)) }
+
+$reader = [Console]::In
+while ($true) {
+  $line = $reader.ReadLine()
+  if ($null -eq $line) { break }
+  $p = $line.Split("`t")
+  if ($p.Length -lt 4) { continue }
+  $r = 'ERR'
+  try {
+    $arg = Dec $p[2]
+    $n = [int]$p[3]
+    switch ($p[1]) {
+      'EV' { $r = [Aud]::EV($arg, $n) }
+      'EM' { $r = [Aud]::EM($arg, ($n -ne 0)) }
+      'AV' { $r = [Aud]::AV($arg, $n) }
+      'AM' { $r = [Aud]::AM($arg, ($n -ne 0)) }
+    }
+  } catch { $r = 'ERR' }
+  [Console]::Out.WriteLine($p[0] + "`t" + $r)
+  [Console]::Out.Flush()
+}

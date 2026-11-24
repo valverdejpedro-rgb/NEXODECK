@@ -88,7 +88,7 @@ try {
       }
     }
     try { ($o | ConvertTo-Json -Compress) | Set-Content -Path $stateFile -Encoding UTF8 } catch {}
-    Start-Sleep -Milliseconds 700
+    Start-Sleep -Milliseconds 200
   }
 }
 finally {
