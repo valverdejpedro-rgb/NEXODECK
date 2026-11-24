@@ -94,6 +94,25 @@ interface ISimpleAudioVolume {
   [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
 }
 
+[ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]
+class PolicyConfigClient { }
+
+[ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IPolicyConfig {
+  [PreserveSig] int GetMixFormat([MarshalAs(UnmanagedType.LPWStr)] string name, IntPtr fmt);
+  [PreserveSig] int GetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string name, [MarshalAs(UnmanagedType.Bool)] bool def, IntPtr fmt);
+  [PreserveSig] int ResetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string name);
+  [PreserveSig] int SetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string name, IntPtr endpointFmt, IntPtr mixFmt);
+  [PreserveSig] int GetProcessingPeriod([MarshalAs(UnmanagedType.LPWStr)] string name, [MarshalAs(UnmanagedType.Bool)] bool def, IntPtr defPeriod, IntPtr minPeriod);
+  [PreserveSig] int SetProcessingPeriod([MarshalAs(UnmanagedType.LPWStr)] string name, IntPtr period);
+  [PreserveSig] int GetShareMode([MarshalAs(UnmanagedType.LPWStr)] string name, IntPtr mode);
+  [PreserveSig] int SetShareMode([MarshalAs(UnmanagedType.LPWStr)] string name, IntPtr mode);
+  [PreserveSig] int GetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string name, [MarshalAs(UnmanagedType.Bool)] bool fx, IntPtr key, IntPtr pv);
+  [PreserveSig] int SetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string name, [MarshalAs(UnmanagedType.Bool)] bool fx, IntPtr key, IntPtr pv);
+  [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string name, int role);
+  [PreserveSig] int SetEndpointVisibility([MarshalAs(UnmanagedType.LPWStr)] string name, [MarshalAs(UnmanagedType.Bool)] bool visible);
+}
+
 public static class Aud {
   static readonly Guid IID_EndpointVolume = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
   static readonly Guid IID_SessionManager2 = new Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
@@ -252,6 +271,33 @@ public static class Aud {
   public static string AM(string exe, bool mute) {
     return EachSession(exe, s => s.SetMute(mute, ref Ctx)) > 0 ? "OK" : "ERR";
   }
+
+  // Pone el dispositivo como predeterminado en los tres roles (consola, multimedia y comunicaciones).
+  public static string SD(string id) {
+    try {
+      IMMDevice d = FindDevice(id);
+      if (d == null) return "ERR";
+      string real; if (d.GetId(out real) != 0 || string.IsNullOrEmpty(real)) return "ERR";
+      IPolicyConfig pc = (IPolicyConfig)(new PolicyConfigClient());
+      int bad = 0;
+      for (int role = 0; role < 3; role++) { if (pc.SetDefaultEndpoint(real, role) != 0) bad++; }
+      return bad == 0 ? "OK" : "ERR";
+    } catch { return "ERR"; }
+  }
+
+  // Dispositivos predeterminados ahora (salida;entrada), por su id interno.
+  public static string DEFS() {
+    List<string> parts = new List<string>();
+    for (int flow = 0; flow < 2; flow++) {
+      string id = "x";
+      try {
+        IMMDevice d;
+        if (Enum().GetDefaultAudioEndpoint(flow, 0, out d) == 0 && d != null) { string g; if (d.GetId(out g) == 0 && g != null) id = g; }
+      } catch { }
+      parts.Add(id);
+    }
+    return "OK\t" + string.Join(";", parts.ToArray());
+  }
 }
 '@
 
@@ -285,6 +331,8 @@ while ($true) {
       'AM' { $r = [Aud]::AM($arg, ($n -ne 0)) }
       'EGM' { $r = [Aud]::EGM($arg) }
       'AL' { $r = [Aud]::AL() }
+      'SD' { $r = [Aud]::SD($arg) }
+      'DEFS' { $r = [Aud]::DEFS() }
     }
   } catch { $r = 'ERR' }
   [Console]::Out.WriteLine($p[0] + "`t" + $r)
