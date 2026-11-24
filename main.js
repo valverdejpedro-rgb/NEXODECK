@@ -16,6 +16,7 @@ let tray = null;
 let quitting = false;
 let settings = {};
 let updateStatus = { state: 'idle' };
+const micWatch = { id: '', vol: null, lastSetAt: 0, log: [], timer: null, busy: false };
 
 const SVCL = app.isPackaged
   ? path.join(process.resourcesPath, 'svcl.exe')
@@ -116,6 +117,7 @@ const validId = (id) => typeof id === 'string' && id.length > 0 && id.length < 5
 ipcMain.handle('audio:state', () => listDevices());
 ipcMain.handle('audio:setVolume', (_, id, pct) => {
   if (!validId(id)) return;
+  micWatch.lastSetAt = Date.now();
   const v = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
   return svcl(['/SetVolume', id, String(v)]);
 });
@@ -249,6 +251,51 @@ ipcMain.handle('apps:setDevice', async (_, t, deviceId, kind) => {
   appDevices.set(t.toLowerCase() + (isIn ? '|in' : '|out'), deviceId || 'default');
 });
 ipcMain.handle('apps:setMute', (_, t, muted) => validTarget(t) && svcl([muted ? '/Mute' : '/Unmute', t]));
+
+/* ---------- Vigilante del volumen del micrófono ---------- */
+
+// Cada 5 s mira el volumen del micrófono predeterminado. Si baja sin que lo haya movido esta app,
+// guarda la hora y qué programas estaban usando el micrófono en ese momento (pista del culpable).
+// La lista se ve en "Copiar diagnóstico de sensores".
+function micUsers(rows) {
+  const h = rows[0].map((x) => x.trim().toLowerCase());
+  const iType = h.indexOf('type'), iDir = h.indexOf('direction'), iState = h.indexOf('device state');
+  const iName = h.indexOf('name'), iPath = h.indexOf('process path');
+  const names = new Set();
+  if (iType < 0 || iDir < 0) return [];
+  for (const r of rows.slice(1)) {
+    if (!/^application$/i.test((r[iType] || '').trim()) || !/capture/i.test(r[iDir] || '')) continue;
+    if (iState >= 0 && !/^active$/i.test((r[iState] || '').trim())) continue;
+    const pp = iPath >= 0 ? (r[iPath] || '').trim() : '';
+    names.add(pp ? path.win32.basename(pp) : (iName >= 0 ? (r[iName] || '').trim() : '?'));
+  }
+  return [...names];
+}
+
+async function micWatchTick() {
+  if (micWatch.busy) return;
+  micWatch.busy = true;
+  try {
+    const rows = await readItems();
+    const def = (await listDevices(rows)).input.find((d) => d.isDefault);
+    if (!def) { micWatch.id = ''; micWatch.vol = null; return; }
+    if (def.id !== micWatch.id) { micWatch.id = def.id; micWatch.vol = def.volume; return; }
+    const ours = Date.now() - micWatch.lastSetAt < 8000;
+    if (micWatch.vol != null && def.volume <= micWatch.vol - 3 && !ours) {
+      micWatch.log.push({
+        at: new Date().toLocaleTimeString('es'),
+        device: def.name, from: Math.round(micWatch.vol), to: Math.round(def.volume), apps: micUsers(rows),
+      });
+      if (micWatch.log.length > 30) micWatch.log.shift();
+    }
+    micWatch.vol = def.volume;
+  } catch {} finally { micWatch.busy = false; }
+}
+
+function startMicWatch() {
+  if (micWatch.timer) return;
+  micWatch.timer = setInterval(micWatchTick, 5000);
+}
 
 /* ---------- Perfiles de energía (powercfg) ---------- */
 
@@ -799,6 +846,10 @@ async function buildDiag() {
   L.push('', '── Ventiladores por WMI (Lenovo) ──');
   L.push(fj ? `${fj.note}${fj.raw ? ' · respuesta: ' + fj.raw : ''} · detectados: ${(fj.fans || []).map((f) => `${f.name}=${f.rpm}`).join(', ') || 'ninguno'}` : 'fans.json: no existe todavía');
 
+  L.push('', '── Volumen del micrófono: bajadas que NO hizo esta app ──');
+  if (!micWatch.log.length) L.push('Ninguna detectada desde que se abrió la app (vigila cada 5 s).');
+  else for (const m of micWatch.log.slice(-10)) L.push(`${m.at} · ${m.device}: ${m.from}% → ${m.to}% · usando el micrófono: ${m.apps.join(', ') || 'ningún programa'}`);
+
   L.push('', '── Sensores (LibreHardwareMonitor) ──');
   let sensors = lhmCache.sensors;
   if (!sensors || Date.now() - lhmCache.at > 5000) sensors = await readLhm();
@@ -966,6 +1017,7 @@ if (!app.requestSingleInstanceLock()) {
     createWindow();
     createTray();
     setupUpdater();
+    startMicWatch();
     globalShortcut.register(SHORTCUT, toggleWindow);
 
     if (app.isPackaged) {
