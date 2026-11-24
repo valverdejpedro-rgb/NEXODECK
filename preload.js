@@ -21,4 +21,5 @@ contextBridge.exposeInMainWorld('api', {
   installUpdate: () => ipcRenderer.invoke('update:install'),
   onUpdate: (cb) => ipcRenderer.on('update:status', (_, s) => cb(s)),
   onShown: (cb) => ipcRenderer.on('ui:shown', () => cb()),
+  onAudioChanged: (cb) => ipcRenderer.on('audio:changed', () => cb()),
 });

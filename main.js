@@ -178,7 +178,9 @@ async function getRows(maxAge = 2500) {
   return refreshRows();
 }
 function invalidateRows() { rc.rows = null; rc.gen++; rc.p = null; }
-function staleRows() { rc.at = 0; }   // se renueva en segundo plano, sin hacer esperar a nadie
+// Tras un cambio: se descarta cualquier lectura que ya estuviera en curso (sería anterior al cambio) y se pide
+// una nueva en segundo plano, sin hacer esperar a nadie (mientras tanto se sirve lo último leído).
+function staleRows() { rc.gen++; rc.p = null; rc.at = Date.now() - 2600; }
 
 async function readItems() {
   const tmp = path.join(os.tmpdir(), `centro-control-${process.pid}-${++csvSeq}.csv`);
@@ -272,19 +274,33 @@ ipcMain.handle('audio:toggleMute', async (_, id, muted) => {
   }
   return svcl(['/Switch', id]);
 });
+// Comprueba (directo en Windows) que el predeterminado ya es el pedido; si no, quien llama usa svcl como respaldo.
+async function confirmDefault(kind, id) {
+  const want = guidOf(itemIds.get(id));
+  if (!want || !kind) return true;               // sin datos para comprobar: se da por bueno
+  for (let i = 0; i < 6; i++) {
+    const r = await fastCall('DEFS', '-', 0);
+    if (!r || !r.ok) return true;
+    const [rid, cid] = r.payload.split(';');
+    if (guidOf(kind === 'input' ? cid : rid) === want) return true;
+    await new Promise((res) => setTimeout(res, 80));
+  }
+  return false;
+}
 ipcMain.handle('audio:setDefault', async (_, id) => {
   if (!validId(id)) return;
   micWatch.lastDefSetAt = Date.now();
   const kind = devKind.get(id);
-  // Camino rápido: se cambia directo en Windows (milisegundos). svcl.exe queda de respaldo.
-  if (await fastAudio('SD', itemIds.get(id), 0)) {
-    if (kind) { lastDef[kind] = id; lastDefChangeAt = Date.now(); followDefaults(kind).catch(() => {}); }
-    staleRows();
-    return;
+  // Camino rápido: se cambia directo en Windows (milisegundos) y se comprueba que de verdad quedó.
+  // Si falla o no queda, svcl.exe hace el cambio de respaldo.
+  if (await fastAudio('SD', itemIds.get(id), 0) && await confirmDefault(kind, id)) staleRows();
+  else {
+    invalidateRows();
+    await svclSet(['/SetDefault', id, 'all']);
   }
-  invalidateRows();
-  await svclSet(['/SetDefault', id, 'all']);
-  if (kind) { lastDef[kind] = id; lastDefChangeAt = Date.now(); await followDefaults(kind); }
+  if (kind) {
+    noteDefault(kind, defKey(id), true);          // sin esperar: las apps en "Predeterminado" lo siguen solas
+  }
 });
 
 /* ---------- Audio por aplicación ---------- */
@@ -348,9 +364,35 @@ async function liveApps() {
   return m;
 }
 
+// Dónde suena/graba cada app AHORA, según la API de audio de Windows (exacto: no depende de comparar nombres
+// de dispositivos ni de lo que svcl leyó hace unos segundos). Clave: "programa|out" o "programa|in".
+async function liveRoutes() {
+  const r = await fastCall('ASD', '-', 0);
+  if (!r || !r.ok) return null;                  // sin ayudante: se usa el respaldo (lectura de svcl)
+  const m = new Map();
+  for (const x of r.payload.split(';')) {
+    const q = x.split('|');
+    if (q.length !== 4) continue;
+    const guid = guidOf(q[3]);
+    if (!guid) continue;
+    const key = q[0].toLowerCase() + (q[1] === 'i' ? '|in' : '|out');
+    if (!m.has(key)) m.set(key, []);
+    m.get(key).push({ active: q[2] === '1', guid });
+  }
+  return m;
+}
+const idByGuid = (devs, guid) => { const d = devs.find((x) => guidOf(itemIds.get(x.id)) === guid); return d ? d.id : ''; };
+// "active": dispositivo de las sesiones activas; "any": el de todas (solo si es uno único; sirve cuando no hay nada elegido).
+function liveDeviceIds(live, key, devs) {
+  const list = live.get(key) || [];
+  const uniq = (arr) => { const s = new Set(arr.map((x) => idByGuid(devs, x.guid)).filter(Boolean)); return s.size === 1 ? [...s][0] : null; };
+  return { active: uniq(list.filter((x) => x.active)), any: uniq(list) };
+}
+
 async function listApps() {
   const rows = await getRows();
   const live = await liveApps().catch(() => new Map());
+  const routes = await liveRoutes().catch(() => null);
   const all = await listDevices(rows);
   await overlayDevices(all);
   const outs = all.output, ins = all.input;
@@ -416,41 +458,61 @@ async function listApps() {
       volume: lv ? lv.volume : main.volume, muted: lv ? lv.muted : main.muted,
       active: a.render ? a.render.active : false,
       micActive: a.capture ? a.capture.active : false,
-      out: a.render ? routeInfo(a.key + '|out', a.render, outs, defOut) : null,
-      in: a.capture ? routeInfo(a.key + '|in', a.capture, ins, defIn) : null,
+      out: a.render ? routeInfo(a.key + '|out', a.render, outs, defOut, routes) : null,
+      in: a.capture ? routeInfo(a.key + '|in', a.capture, ins, defIn, routes) : null,
     };
   });
   return {
     apps,
     devices: outs.map(({ id, name }) => ({ id, name })),
     inputs: ins.map(({ id, name }) => ({ id, name })),
+    defaultOut: defOut || '',
+    defaultIn: defIn || '',
   };
 }
 
-function routeInfo(storeKey, sess, devs, defId) {
-  const detected = detectDevice(sess.deviceRaw, devs);
+// Qué dispositivo mostrar para una app (y si hay un cambio pendiente). Reglas:
+//  · Lo que la app usa DE VERDAD (sesión activa, según Windows) manda sobre lo que se eligió, pero solo
+//    pasados unos segundos desde que se eligió (Windows tarda un poco en mover el sonido).
+//  · Las sesiones inactivas no cuentan como prueba (Zoom, Discord… dejan sesiones viejas abiertas en el
+//    dispositivo anterior): una app parada muestra lo que se eligió.
+//  · "Predeterminado del sistema" (stored === 'default') se muestra como tal mientras la app use el
+//    dispositivo predeterminado actual.
+const ROUTE_GRACE = 8000;
+function routeInfo(storeKey, sess, devs, defId, routes) {
   const stored = appDevices.get(storeKey);
-  const storedId = stored && stored !== 'default' ? stored : '';
-  let deviceId = detected || storedId || '';
-  let pending = false;
+  const explicit = stored && stored !== 'default' ? stored : '';
+  let evidence, loose;
+  if (routes) {
+    const l = liveDeviceIds(routes, storeKey.replace(/\.exe(\|(?:in|out))$/i, '$1'), devs);
+    evidence = l.active; loose = l.any;
+  } else {
+    evidence = loose = detectDevice(sess.deviceRaw, devs);   // respaldo si el ayudante rápido no está
+  }
+  const at = appDeviceAt.get(storeKey);
+  const fresh = !!at && Date.now() - at < ROUTE_GRACE;
+  const nameOf = (id) => (devs.find((d) => d.id === id) || {}).name || '';
+  let deviceId = '', pending = false, inUse = '';
+
   if (stored === 'default') {
-    // Manda lo que la app usa de verdad: si ya no es el del sistema (p. ej. se cambió dentro de Zoom o con la
-    // app cerrada), se muestra ese dispositivo y no "Predeterminado".
-    deviceId = detected && detected !== defId ? detected : '';
-    pending = !!detected && detected !== defId;
-    // Si pasa un buen rato usando otro dispositivo sin que haya cambiado el del sistema, lo cambiaron por fuera
-    // (en la propia app o con esta cerrada): se deja de forzar "Predeterminado".
-    if (pending) {
+    if (evidence && evidence !== defId && !fresh) {
+      deviceId = evidence; pending = true; inUse = nameOf(evidence);
+      // Si pasa un buen rato usando otro dispositivo sin que haya cambiado el del sistema, lo cambiaron por fuera
+      // (en la propia app o con esta cerrada): se deja de forzar "Predeterminado".
       const since = mismatchSince.get(storeKey) || Date.now();
       mismatchSince.set(storeKey, since);
       if (Date.now() - since > 20000 && Date.now() - lastDefChangeAt > 20000) {
-        appDevices.delete(storeKey); persistAppDevices(); mismatchSince.delete(storeKey); pending = false;
+        appDevices.delete(storeKey); persistAppDevices(); mismatchSince.delete(storeKey); pending = false; inUse = '';
       }
     } else mismatchSince.delete(storeKey);
-  } else if (storedId && detected && detected !== storedId) pending = true;
-  const at = appDeviceAt.get(storeKey);
-  if (stored && at && Date.now() - at < 6000) deviceId = stored === 'default' ? '' : storedId;
-  return { deviceId, deviceRaw: sess.deviceRaw, pending };
+  } else if (explicit) {
+    if (evidence && evidence !== explicit && !fresh) { deviceId = evidence; pending = true; inUse = nameOf(evidence); }
+    else deviceId = explicit;
+  } else {
+    const seen = evidence || loose;
+    deviceId = seen && seen !== defId ? seen : '';
+  }
+  return { deviceId, deviceRaw: sess.deviceRaw, pending, inUse };
 }
 
 // Intenta saber en qué dispositivo suena/graba la app (según lo que informa svcl).
@@ -478,16 +540,33 @@ ipcMain.handle('apps:setDevice', async (_, t, deviceId, kind) => {
   if (!validTarget(t)) return;
   if (deviceId && !validTarget(deviceId)) return;
   const isIn = kind === 'input';
+  // Un dispositivo de salida no puede fijarse como entrada (ni al revés).
+  if (deviceId && devKind.get(deviceId) && devKind.get(deviceId) !== (isIn ? 'input' : 'output')) return;
   const fallback = isIn ? 'DefaultCaptureDevice' : 'DefaultRenderDevice';
   const key = t.toLowerCase() + (isIn ? '|in' : '|out');
+  const prevIntent = appDevices.get(key), prevAt = appDeviceAt.get(key);
   // Se recuerda la intención primero: así "Predeterminado del sistema" se sigue aplicando aunque cambie después.
   appDevices.set(key, deviceId || 'default');
   appDeviceAt.set(key, Date.now());
+  mismatchSince.delete(key);
   persistAppDevices();
-  try { await svclSet(['/SetAppDefault', deviceId || fallback, 'all', t]); }
-  catch { await svclSet(['/SetAppDefault', deviceId || fallback, 'all', t]); }
+  try {
+    try { await svclSet(['/SetAppDefault', deviceId || fallback, 'all', t]); }
+    catch { await svclSet(['/SetAppDefault', deviceId || fallback, 'all', t]); }
+  } catch (e) {
+    // No se pudo aplicar: se deshace lo recordado, para que la lista no muestre algo que Windows no tiene.
+    if (prevIntent === undefined) appDevices.delete(key); else appDevices.set(key, prevIntent);
+    if (prevAt === undefined) appDeviceAt.delete(key); else appDeviceAt.set(key, prevAt);
+    persistAppDevices();
+    staleRows();
+    throw e;
+  }
   staleRows();
 });
+
+function notifyAudioChanged() {
+  if (win && !win.isDestroyed()) win.webContents.send('audio:changed');
+}
 
 // "Predeterminado del sistema" en una app = que siga al dispositivo predeterminado de Windows.
 // Windows no siempre lo hace solo con lo que fija svcl, así que cuando cambia el predeterminado
@@ -496,19 +575,54 @@ async function followDefaults(kind) {
   const suffix = kind === 'input' ? '|in' : '|out';
   const name = kind === 'input' ? 'DefaultCaptureDevice' : 'DefaultRenderDevice';
   let n = 0;
-  for (const [k, v] of [...appDevices]) {
-    if (v !== 'default' || !k.endsWith(suffix)) continue;
+  for (const k of [...appDevices.keys()]) {
+    // Se vuelve a mirar en cada vuelta: si mientras tanto elegiste un dispositivo concreto para esa app, no se pisa.
+    if (appDevices.get(k) !== 'default' || !k.endsWith(suffix)) continue;
     try { await svclSet(['/SetAppDefault', name, 'all', k.slice(0, -suffix.length)]); n++; } catch {}
   }
-  if (n) staleRows();
+  if (n) { staleRows(); notifyAudioChanged(); }
+}
+
+// Identificador estable del dispositivo para comparar predeterminados (el GUID de Windows; si no hay, el id de svcl).
+const defKey = (id) => guidOf(itemIds.get(id)) || id;
+// Anota cuál es el predeterminado actual. Si cambió (o se fuerza porque lo pediste tú) y hay apps en
+// "Predeterminado del sistema", se les vuelve a aplicar. Devuelve true si hubo un cambio.
+function noteDefault(kind, key, force) {
+  if (!key) return false;
+  const prev = lastDef[kind];
+  lastDef[kind] = key;
+  // Al abrir la app solo se toma nota: no se pisa lo que cambiaste con ella cerrada.
+  if (prev === null && !force) return false;
+  if (prev === key && !force) return false;
+  lastDefChangeAt = Date.now();
+  followDefaults(kind).catch(() => {});
+  return prev !== key;
 }
 function checkDefaults(st) {
   for (const kind of ['input', 'output']) {
     const d = (st[kind] || []).find((x) => x.isDefault);
-    if (!d) continue;
-    if (lastDef[kind] === null) { lastDef[kind] = d.id; continue; }   // al abrir la app solo se toma nota: no se pisa lo que cambiaste con ella cerrada
-    if (lastDef[kind] !== d.id) { lastDef[kind] = d.id; lastDefChangeAt = Date.now(); followDefaults(kind).catch(() => {}); }
+    if (d) noteDefault(kind, defKey(d.id));
   }
+}
+
+// Vigilante de predeterminados: consulta a Windows cada ~0,7 s (barato) para enterarse al momento si el
+// dispositivo predeterminado cambió por fuera (Windows, otra app, un enchufe/desenchufe) aunque la ventana
+// esté oculta, y avisa a la pantalla para que se actualice sin esperar.
+const defWatch = { timer: null, busy: false };
+async function defWatchTick() {
+  if (defWatch.busy || !itemIds.size) return;
+  defWatch.busy = true;
+  try {
+    const r = await fastCall('DEFS', '-', 0);
+    if (!r || !r.ok) return;
+    const [rid, cid] = r.payload.split(';');
+    const a = noteDefault('output', guidOf(rid));
+    const b = noteDefault('input', guidOf(cid));
+    if (a || b) { staleRows(); notifyAudioChanged(); }
+  } catch {} finally { defWatch.busy = false; }
+}
+function startDefWatch() {
+  if (!defWatch.timer) defWatch.timer = setInterval(defWatchTick, 700);
 }
 ipcMain.handle('apps:setMute', async (_, t, muted) => {
   if (!validTarget(t)) return;
@@ -1533,6 +1647,7 @@ if (!app.requestSingleInstanceLock()) {
     setupUpdater();
     startMicWatch();
     startFastAudio();
+    startDefWatch();
     globalShortcut.register(SHORTCUT, toggleWindow);
 
     if (app.isPackaged) {

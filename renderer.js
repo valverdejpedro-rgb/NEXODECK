@@ -36,11 +36,14 @@ function paintSlider(p, value) {
   p.pct.textContent = Math.round(value);
 }
 
+let lastState = null;
 function render(state) {
+  lastState = state;
   for (const kind of KINDS) {
     const p = panels[kind];
     p.devices = state[kind] || [];
-    // Mientras Windows confirma el cambio, se sigue mostrando el dispositivo que acabas de elegir.
+    // Mientras Windows confirma el cambio, se sigue mostrando el dispositivo que acabas de elegir
+    // (hasta que Windows confirme o pasen unos segundos).
     if (p.want) {
       const cur = p.devices.find((d) => d.isDefault);
       if (Date.now() > p.want.until || (cur && cur.id === p.want.id)) p.want = null;
@@ -48,8 +51,10 @@ function render(state) {
     }
     p.current = p.devices.find((d) => d.isDefault) || p.devices[0] || null;
 
-    const sig = p.devices.map((d) => d.id + '|' + d.name + '|' + d.isDefault).join('\n');
-    if (sig !== p.signature) {
+    // La firma NO incluye cuál es el predeterminado: cambiarlo no debe reconstruir la lista (cerraría el menú abierto).
+    const sig = p.devices.map((d) => d.id + '|' + d.name).join('\n');
+    const rebuilt = sig !== p.signature;
+    if (rebuilt) {
       p.signature = sig;
       p.select.replaceChildren(
         ...p.devices.map((d) => {
@@ -70,7 +75,8 @@ function render(state) {
     p.mute.disabled = !p.current;
     if (!p.current) { paintSlider(p, 0); p.el.classList.remove('muted'); continue; }
 
-    p.select.value = p.current.id;
+    // Con el menú abierto o enfocado no se toca la selección (si no, "salta" mientras eliges); al soltar el foco se repinta.
+    if (rebuilt || document.activeElement !== p.select) p.select.value = p.current.id;
     p.el.classList.toggle('muted', p.current.muted);
     p.mute.setAttribute('aria-pressed', String(p.current.muted));
     if (!p.dragging) {
@@ -173,7 +179,7 @@ for (const kind of KINDS) {
 
   p.select.addEventListener('change', () => {
     const id = p.select.value;
-    p.want = { id, until: Date.now() + 3000 };
+    p.want = { id, until: Date.now() + 6000 };
     const d = p.devices.find((x) => x.id === id);
     if (d) {                                   // se refleja al instante, sin esperar a Windows
       p.current = d;
@@ -181,8 +187,10 @@ for (const kind of KINDS) {
       p.mute.setAttribute('aria-pressed', String(d.muted));
       if (!p.dragging) { p.slider.value = d.volume; paintSlider(p, d.volume); }
     }
+    p.select.blur();                           // así la lista vuelve a seguir lo que informa Windows
     act(() => window.api.setDefault(id));
   });
+  p.select.addEventListener('blur', () => { if (lastState) render(lastState); });
 }
 
 function renderUpdate(s) {
@@ -201,6 +209,9 @@ function renderUpdate(s) {
 
 window.api.onUpdate(renderUpdate);
 window.api.onShown(() => refreshActive());
+// El programa avisa cuando el dispositivo predeterminado cambió por fuera (Windows, otra app, enchufar/desenchufar)
+// o cuando terminó de aplicarlo a las apps: se actualiza al instante, sin esperar al siguiente ciclo.
+window.api.onAudioChanged(() => { if (!document.hidden) refreshActive(); });
 window.api.info().then((i) => {
   versionEl.textContent = `Versión ${i.version}`;
   renderUpdate(i.update);
@@ -364,13 +375,16 @@ function makeAppRow() {
   // Al elegir se quita el foco del selector: así la lista vuelve a seguir lo que informa Windows.
   row.outSelect.addEventListener('change', () => { const v = row.outSelect.value; row.outSelect.blur(); actApps(() => window.api.setAppDevice(row.target, v, 'output')); });
   row.inSelect.addEventListener('change', () => { const v = row.inSelect.value; row.inSelect.blur(); actApps(() => window.api.setAppDevice(row.target, v, 'input')); });
+  // Al soltar el foco sin elegir nada, la lista se vuelve a sincronizar con Windows enseguida.
+  row.outSelect.addEventListener('blur', () => setTimeout(refreshApps, 100));
+  row.inSelect.addEventListener('blur', () => setTimeout(refreshApps, 100));
   return row;
 }
 
-function fillDeviceSelect(select, devices) {
+function fillDeviceSelect(select, devices, defName) {
   const first = document.createElement('option');
   first.value = '';
-  first.textContent = 'Predeterminado del sistema';
+  first.textContent = defName ? `Predeterminado del sistema (${defName})` : 'Predeterminado del sistema';
   select.replaceChildren(first, ...devices.map((d) => {
     const o = document.createElement('option');
     o.value = d.id;
@@ -379,19 +393,23 @@ function fillDeviceSelect(select, devices) {
   }));
 }
 
-function updateRoute(route, select, hint, info, show, devices, sigKey, row) {
+function updateRoute(route, select, hint, info, show, devices, sigKey, row, defId) {
   route.hidden = !show;
   hint.hidden = !(show && info && info.pending);
   if (!show || !info) return;
-  const sig = devices.map((d) => d.id + '|' + d.name).join('\n');
-  if (row[sigKey] !== sig) { row[sigKey] = sig; fillDeviceSelect(select, devices); }
+  if (!hint.dataset.base) hint.dataset.base = hint.textContent;
+  if (info.pending) hint.textContent = info.inUse ? `Ahora usa «${info.inUse}». ${hint.dataset.base}` : hint.dataset.base;
+  const defName = ((devices.find((d) => d.id === defId) || {}).name) || '';
+  const sig = devices.map((d) => d.id + '|' + d.name).join('\n') + '\n#' + defName;
+  const rebuilt = row[sigKey] !== sig;
+  if (rebuilt) { row[sigKey] = sig; fillDeviceSelect(select, devices, defName); }
   select.title = info.deviceRaw ? `Detectado: ${info.deviceRaw}` : '';
-  if (document.activeElement !== select) {
+  if (rebuilt || document.activeElement !== select) {
     select.value = devices.some((d) => d.id === info.deviceId) ? info.deviceId : '';
   }
 }
 
-function updateAppRow(row, a, devices, inputs) {
+function updateAppRow(row, a, devices, inputs, defOut, defIn) {
   row.target = a.target;
   row.muted = a.muted;
   row.active = a.active;
@@ -412,8 +430,8 @@ function updateAppRow(row, a, devices, inputs) {
     row.icon.hidden = false;
   } else row.icon.hidden = true;
 
-  updateRoute(row.outRoute, row.outSelect, row.outHint, a.out, a.canRoute && a.hasOut, devices, 'sigOut', row);
-  updateRoute(row.inRoute, row.inSelect, row.inHint, a.in, a.canRoute && a.hasIn, inputs, 'sigIn', row);
+  updateRoute(row.outRoute, row.outSelect, row.outHint, a.out, a.canRoute && a.hasOut, devices, 'sigOut', row, defOut);
+  updateRoute(row.inRoute, row.inSelect, row.inHint, a.in, a.canRoute && a.hasIn, inputs, 'sigIn', row, defIn);
 
   row.control.hidden = !a.hasOut; // una app que solo usa el micrófono no tiene volumen de salida
   if (!row.dragging) {
@@ -422,7 +440,7 @@ function updateAppRow(row, a, devices, inputs) {
   }
 }
 
-function renderApps({ apps, devices, inputs }) {
+function renderApps({ apps, devices, inputs, defaultOut, defaultIn }) {
   const seen = new Set();
   for (const a of apps) {
     seen.add(a.key);
@@ -433,7 +451,7 @@ function renderApps({ apps, devices, inputs }) {
       appsListEl.appendChild(row.el);
       appsOrder = '';
     }
-    updateAppRow(row, a, devices, inputs || []);
+    updateAppRow(row, a, devices, inputs || [], defaultOut || '', defaultIn || '');
   }
   for (const [key, row] of appRows) {
     if (!seen.has(key)) { row.el.remove(); appRows.delete(key); appsOrder = ''; }
