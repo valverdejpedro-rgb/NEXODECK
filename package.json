@@ -21,20 +21,60 @@
   "build": {
     "appId": "com.pedro.centrocontrol",
     "productName": "Centro de Control",
-    "directories": { "buildResources": "build" },
-    "files": ["main.js", "preload.js", "index.html", "styles.css", "renderer.js", "mixer.html", "mixer.js", "mixer.css", "assets/**/*"],
-    "extraResources": [
-      { "from": "bin/svcl.exe", "to": "svcl.exe" },
-      { "from": "bin/PresentMon.exe", "to": "PresentMon.exe" },
-      { "from": "bin/lhm", "to": "lhm" },
-      { "from": "scripts/sensores.ps1", "to": "sensores.ps1" }
+    "directories": {
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "styles.css",
+      "renderer.js",
+      "mixer.html",
+      "mixer.js",
+      "mixer.css",
+      "assets/**/*"
     ],
-    "win": { "target": "nsis", "icon": "build/icon.png" },
+    "extraResources": [
+      {
+        "from": "bin/svcl.exe",
+        "to": "svcl.exe"
+      },
+      {
+        "from": "bin/PresentMon.exe",
+        "to": "PresentMon.exe"
+      },
+      {
+        "from": "bin/lhm",
+        "to": "lhm"
+      },
+      {
+        "from": "scripts/sensores.ps1",
+        "to": "sensores.ps1"
+      },
+      {
+        "from": "bin/iCUESDK.x64_2019.dll",
+        "to": "iCUESDK.x64_2019.dll"
+      },
+      {
+        "from": "scripts/audifonos.ps1",
+        "to": "audifonos.ps1"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.png"
+    },
     "nsis": {
       "oneClick": true,
       "perMachine": false,
       "artifactName": "CentroControl-Setup-${version}.exe"
     },
-    "publish": [{ "provider": "github", "releaseType": "release" }]
+    "publish": [
+      {
+        "provider": "github",
+        "releaseType": "release"
+      }
+    ]
   }
 }

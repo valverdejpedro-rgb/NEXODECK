@@ -1,6 +1,6 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, globalShortcut, nativeImage, clipboard } = require('electron');
 const { autoUpdater } = require('electron-updater');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -297,6 +297,37 @@ function startMicWatch() {
   micWatch.timer = setInterval(micWatchTick, 5000);
 }
 
+/* ---------- Audífonos Corsair (preset de ecualizador y batería, vía SDK de iCUE) ---------- */
+
+// Un ayudante de PowerShell (sin administrador) lee los datos del SDK de iCUE y los deja en estado.json.
+// Solo se activa si la DLL del SDK viene incluida en la app (bin/iCUESDK.x64_2019.dll).
+const HS_DLL = app.isPackaged ? path.join(process.resourcesPath, 'iCUESDK.x64_2019.dll') : path.join(__dirname, 'bin', 'iCUESDK.x64_2019.dll');
+const HS_PS1 = app.isPackaged ? path.join(process.resourcesPath, 'audifonos.ps1') : path.join(__dirname, 'scripts', 'audifonos.ps1');
+const hsDir = () => path.join(app.getPath('userData'), 'audifonos');
+let hsProc = null, hsStartedAt = 0;
+
+function startHeadsetHelper() {
+  if (hsProc || Date.now() - hsStartedAt < 15000 || !fs.existsSync(HS_DLL) || !fs.existsSync(HS_PS1)) return;
+  hsStartedAt = Date.now();
+  try {
+    hsProc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+      '-File', HS_PS1, '-ParentPid', String(process.pid), '-DllPath', HS_DLL, '-DataDir', hsDir()],
+    { windowsHide: true, stdio: 'ignore' });
+    hsProc.on('exit', () => { hsProc = null; });
+    hsProc.on('error', () => { hsProc = null; });
+  } catch { hsProc = null; }
+}
+
+ipcMain.handle('hs:state', () => {
+  if (!fs.existsSync(HS_DLL)) return { available: false };
+  startHeadsetHelper();
+  const file = path.join(hsDir(), 'estado.json');
+  let fresh = false;
+  try { fresh = Date.now() - fs.statSync(file).mtimeMs < 6000; } catch {}
+  const j = fresh ? readJsonFile(file) : null;
+  return j ? { available: true, running: true, ...j } : { available: true, running: false };
+});
+
 /* ---------- Perfiles de energía (powercfg) ---------- */
 
 // chcp 65001 para que los nombres con tilde (p. ej. "Máximo rendimiento") lleguen bien.
@@ -360,26 +391,36 @@ function sampleCpu() {
 // GPU NVIDIA (nvidia-smi viene con el controlador, no necesita permisos de administrador)
 let nvPath = null, nvMissingUntil = 0;
 const toNum = (s) => { const n = parseFloat(s); return Number.isFinite(n) ? n : null; };
+const NV_BASE = 'name,utilization.gpu,temperature.gpu,memory.used,memory.total,fan.speed';
+let nvFields = null; // campos que este controlador acepta (el margen térmico solo existe en controladores nuevos)
 async function readNvidia() {
   if (Date.now() < nvMissingUntil) return [];
-  const fields = 'name,utilization.gpu,temperature.gpu,memory.used,memory.total,fan.speed';
   const cands = nvPath ? [nvPath] : [
     'nvidia-smi',
     path.join(process.env.ProgramFiles || 'C:\\Program Files', 'NVIDIA Corporation', 'NVSMI', 'nvidia-smi.exe'),
   ];
+  const fieldSets = nvFields ? [nvFields] : [`${NV_BASE},temperature.gpu.tlimit`, NV_BASE];
   for (const c of cands) {
-    try {
-      const out = await new Promise((res, rej) => execFile(c,
-        [`--query-gpu=${fields}`, '--format=csv,noheader,nounits'],
-        { windowsHide: true, timeout: 3000 }, (e, so) => (e ? rej(e) : res(so))));
-      const lines = String(out).split(/\r?\n/).filter((l) => l.trim());
-      if (!lines.length) continue;
-      nvPath = c;
-      return lines.map((line) => {
-        const p = line.split(',').map((x) => x.trim());
-        return { vendor: 'nvidia', name: p[0], usage: toNum(p[1]), temp: toNum(p[2]), vramUsed: toNum(p[3]), vramTotal: toNum(p[4]), fan: toNum(p[5]), source: 'nvidia-smi' };
-      });
-    } catch {}
+    for (const fields of fieldSets) {
+      try {
+        const out = await new Promise((res, rej) => execFile(c,
+          [`--query-gpu=${fields}`, '--format=csv,noheader,nounits'],
+          { windowsHide: true, timeout: 3000 }, (e, so) => (e ? rej(e) : res(so))));
+        const lines = String(out).split(/\r?\n/).filter((l) => l.trim());
+        if (!lines.length) continue;
+        nvPath = c; nvFields = fields;
+        return lines.map((line) => {
+          const p = line.split(',').map((x) => x.trim());
+          const temp = toNum(p[2]);
+          // El controlador informa cuántos grados faltan para que la tarjeta empiece a bajar rendimiento:
+          // temperatura actual + margen = límite real de esta tarjeta.
+          const margin = toNum(p[6]);
+          const lim = temp != null && margin != null && margin > 0 ? temp + margin : null;
+          return { vendor: 'nvidia', name: p[0], usage: toNum(p[1]), temp, tempLimit: lim && lim >= 70 && lim <= 115 ? lim : null,
+                   vramUsed: toNum(p[3]), vramTotal: toNum(p[4]), fan: toNum(p[5]), source: 'nvidia-smi' };
+        });
+      } catch {}
+    }
   }
   nvMissingUntil = Date.now() + 60000;
   return [];
@@ -504,7 +545,17 @@ function summarizeLhm(sensors) {
   const pick = cpuT.find((s) => /tctl|tdie|package|core \(max\)/i.test(s.name)) || maxOf(cpuT);
   const gen = maxOf(temps);
   const fans = sensors.filter((s) => s.type === 'fan' && s.value != null).map((s) => ({ name: s.name, rpm: Math.round(s.value) }));
+  // Intel informa su "distancia a TjMax" por núcleo: temperatura del núcleo + distancia = límite real del procesador.
+  // AMD no lo informa, y entonces la app usa los valores fijos.
+  let cpuLimit = null;
+  for (const d of sensors) {
+    if (!/^\/intelcpu\//.test(d.id) || d.type !== 'temperature' || d.value == null || !/distance to tjmax/i.test(d.name)) continue;
+    const coreName = d.name.replace(/\s*distance to tjmax/i, '').trim();
+    const core = sensors.find((x) => x.id.startsWith(d.id.split('/').slice(0, 3).join('/')) && x.type === 'temperature' && x.name === coreName && x.value != null);
+    if (core) { const lim = core.value + d.value; if (lim >= 80 && lim <= 125) { cpuLimit = Math.round(lim); break; } }
+  }
   return {
+    cpuLimit,
     cpuTemp: pick ? pick.value : null,
     general: gen ? { value: gen.value, name: gen.name } : null,
     fans,
@@ -762,7 +813,7 @@ ipcMain.handle('sys:state', async () => {
   });
 
   return {
-    cpu: { usage: cpu.usage, maxCore: cpu.maxCore, temp: cpuTemp, cores: os.cpus().length, model: (os.cpus()[0] || {}).model || '' },
+    cpu: { usage: cpu.usage, maxCore: cpu.maxCore, temp: cpuTemp, tempLimit: lhm ? lhm.cpuLimit : null, cores: os.cpus().length, model: (os.cpus()[0] || {}).model || '' },
     gpus,
     ram: { used: total - free, total },
     fans: (lhm && lhm.fans.length) ? lhm.fans : wmiFans(),
@@ -1035,5 +1086,5 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('window-all-closed', () => app.quit());
-  app.on('will-quit', () => globalShortcut.unregisterAll());
+  app.on('will-quit', () => { globalShortcut.unregisterAll(); if (hsProc) { try { hsProc.kill(); } catch {} } });
 }

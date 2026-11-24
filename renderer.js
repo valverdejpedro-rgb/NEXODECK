@@ -68,11 +68,40 @@ function showError(msg) {
   errorEl.textContent = msg || '';
 }
 
+/* Audífonos Corsair: preset de ecualizador activo (solo aparece si la app trae el SDK de iCUE).
+   El SDK numera los presets desde 0, en el mismo orden que muestra iCUE. */
+const HS_PRESETS = ['Pure Direct', 'Movie Theater', 'FPS Competition', 'Clear Chat', 'Bass Boost'];
+const hsEl = document.createElement('section');
+hsEl.className = 'panel hs';
+hsEl.hidden = true;
+hsEl.innerHTML = '<div class="head"><label>Audífonos Corsair</label><b class="hs-preset">–</b></div><p class="hs-note"></p>';
+document.getElementById('tab-devices').insertBefore(hsEl, errorEl);
+const hsPreset = hsEl.querySelector('.hs-preset');
+const hsNote = hsEl.querySelector('.hs-note');
+
+async function refreshHeadset() {
+  let s;
+  try { s = await window.api.getHeadset(); } catch { return; }
+  if (!s || !s.available) { hsEl.hidden = true; return; }
+  hsEl.hidden = false;
+  let big = '–', note = '';
+  if (!s.running) note = 'Conectando con iCUE…';
+  else if (!s.connected) note = 'No se conecta con iCUE. Ábrelo y activa el control de terceros (SDK) en sus ajustes.';
+  else if (!s.headset) note = 'No se detecta ningún audífono Corsair.';
+  else {
+    if (s.preset != null) big = HS_PRESETS[s.preset] || `Preset ${s.preset + 1}`;
+    note = `${s.model || 'Audífonos'}${s.battery != null ? ` · Batería ${s.battery}%` : ''}`;
+  }
+  hsPreset.textContent = big;
+  hsNote.textContent = note;
+}
+
 async function refresh() {
   if (busy) return;
   try {
     render(await window.api.getState());
     showError('');
+    refreshHeadset();
   } catch (e) {
     showError('No se pudo leer el audio. Revisa que bin/svcl.exe esté incluido en la app.');
   }
@@ -521,6 +550,9 @@ function syncCards(ids, titles) {
 
 // ok / warm / hot según los umbrales
 const level = (v, lim) => (v == null ? '' : v >= lim[1] ? 'hot' : v >= lim[0] ? 'warm' : 'ok');
+// Si el chip informa su límite real de temperatura, los umbrales se calculan a partir de él
+// (ámbar a 10 °C del límite, rojo a 3 °C); si no lo informa, se usan los valores fijos de LIMITS.
+const limitsFor = (maxT, fixed) => (maxT && maxT > 60 ? [maxT - 10, maxT - 3] : fixed);
 const fmtT = (t) => (t == null ? '' : `${Math.round(t)} °C`);
 const gb = (mb) => (mb / 1024).toFixed(1);
 
@@ -684,7 +716,7 @@ function renderSystem(s) {
   if (!gpus.length) { ids.splice(1, 0, 'gpu0'); titles.gpu0 = 'GPU'; }
   syncCards(ids, titles);
 
-  const cpuTempLv = level(cpu.temp, LIMITS.cpuTemp);
+  const cpuTempLv = level(cpu.temp, limitsFor(cpu.tempLimit, LIMITS.cpuTemp));
   setStat('cpu', {
     sub: `${cpu.cores} hilos`,
     big: Math.round(cpu.usage), unit: '%',
@@ -700,7 +732,7 @@ function renderSystem(s) {
   gpus.forEach((g, i) => {
     const label = multi ? `GPU ${i + 1}` : 'GPU';
     const hasData = g.usage != null || g.temp != null;
-    const tLv = level(g.temp, LIMITS.gpuTemp);
+    const tLv = level(g.temp, limitsFor(g.tempLimit, LIMITS.gpuTemp));
     setStat(`gpu${i}`, {
       sub: (g.name || '').replace(/^NVIDIA\s+/i, '').replace(/GeForce\s+/i, '').replace(/^AMD\s+/i, '').replace(/\s*\(TM\)/gi, ''),
       big: g.usage == null ? null : Math.round(g.usage), unit: g.usage == null ? '' : '%',
