@@ -285,6 +285,42 @@ public static class Aud {
     } catch { return "ERR"; }
   }
 
+  // Dónde está cada sesión de audio de las apps ahora mismo (salida y entrada):
+  // "programa|o/i|estado|idDispositivo;..."  (estado: 0 inactiva, 1 activa; las caducadas no se incluyen)
+  public static string ASD() {
+    List<string> parts = new List<string>();
+    for (int flow = 0; flow < 2; flow++) {
+      try {
+        IMMDeviceCollection col;
+        if (Enum().EnumAudioEndpoints(flow, 1, out col) != 0 || col == null) continue;
+        int n; col.GetCount(out n);
+        for (int i = 0; i < n; i++) {
+          try {
+            IMMDevice dev; if (col.Item(i, out dev) != 0 || dev == null) continue;
+            string did; if (dev.GetId(out did) != 0 || string.IsNullOrEmpty(did)) continue;
+            object o; Guid iid = IID_SessionManager2;
+            if (dev.Activate(ref iid, 23, IntPtr.Zero, out o) != 0 || o == null) continue;
+            IAudioSessionManager2 mgr = (IAudioSessionManager2)o;
+            IAudioSessionEnumerator se;
+            if (mgr.GetSessionEnumerator(out se) != 0 || se == null) continue;
+            int cnt; se.GetCount(out cnt);
+            for (int k = 0; k < cnt; k++) {
+              IAudioSessionControl2 c;
+              if (se.GetSession(k, out c) != 0 || c == null) continue;
+              uint pid; if (c.GetProcessId(out pid) != 0 || pid == 0) continue;
+              string name = ProcName(pid);
+              if (name == null) continue;
+              int st; if (c.GetState(out st) != 0) continue;
+              if (st == 2) continue;
+              parts.Add(name.Replace("|", "_").Replace(";", "_") + "|" + (flow == 0 ? "o" : "i") + "|" + st.ToString() + "|" + did);
+            }
+          } catch { }
+        }
+      } catch { }
+    }
+    return "OK\t" + string.Join(";", parts.ToArray());
+  }
+
   // Dispositivos predeterminados ahora (salida;entrada), por su id interno.
   public static string DEFS() {
     List<string> parts = new List<string>();
@@ -333,6 +369,7 @@ while ($true) {
       'AL' { $r = [Aud]::AL() }
       'SD' { $r = [Aud]::SD($arg) }
       'DEFS' { $r = [Aud]::DEFS() }
+      'ASD' { $r = [Aud]::ASD() }
     }
   } catch { $r = 'ERR' }
   [Console]::Out.WriteLine($p[0] + "`t" + $r)
