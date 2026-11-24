@@ -14,6 +14,8 @@ const appDevices = new Map();   // "programa.exe|in" / "programa.exe|out" -> id 
 const appDeviceAt = new Map();  // cuándo se eligió (para no mostrar un valor viejo mientras Windows aplica el cambio)
 const devKind = new Map();      // id de dispositivo -> 'input' | 'output'
 const lastDef = { input: null, output: null };
+let lastDefChangeAt = 0;                 // última vez que cambió algún predeterminado del sistema
+const mismatchSince = new Map();         // desde cuándo una app "Predeterminado" usa otro dispositivo
 function persistAppDevices() { settings.appDevices = Object.fromEntries(appDevices); saveSettings(); }
 let csvSeq = 0;
 let tray = null;
@@ -170,7 +172,9 @@ function refreshRows() {
 }
 async function getRows(maxAge = 2500) {
   if (rc.rows && Date.now() - rc.at < maxAge) return rc.rows;
-  if (rc.rows) { refreshRows().catch(() => {}); return rc.rows; }
+  // Se puede servir lo último leído mientras se renueva, pero solo si es reciente: si pasó un rato
+  // (ventana oculta, otra pestaña) se espera la lectura nueva para no mostrar datos viejos.
+  if (rc.rows && Date.now() - rc.at < 6000) { refreshRows().catch(() => {}); return rc.rows; }
   return refreshRows();
 }
 function invalidateRows() { rc.rows = null; rc.gen++; rc.p = null; }
@@ -274,13 +278,13 @@ ipcMain.handle('audio:setDefault', async (_, id) => {
   const kind = devKind.get(id);
   // Camino rápido: se cambia directo en Windows (milisegundos). svcl.exe queda de respaldo.
   if (await fastAudio('SD', itemIds.get(id), 0)) {
-    if (kind) { lastDef[kind] = id; followDefaults(kind).catch(() => {}); }
+    if (kind) { lastDef[kind] = id; lastDefChangeAt = Date.now(); followDefaults(kind).catch(() => {}); }
     staleRows();
     return;
   }
   invalidateRows();
   await svclSet(['/SetDefault', id, 'all']);
-  if (kind) { lastDef[kind] = id; await followDefaults(kind); }
+  if (kind) { lastDef[kind] = id; lastDefChangeAt = Date.now(); await followDefaults(kind); }
 });
 
 /* ---------- Audio por aplicación ---------- */
@@ -429,8 +433,21 @@ function routeInfo(storeKey, sess, devs, defId) {
   const storedId = stored && stored !== 'default' ? stored : '';
   let deviceId = detected || storedId || '';
   let pending = false;
-  if (stored === 'default') { deviceId = ''; pending = !!detected && detected !== defId; }
-  else if (storedId && detected && detected !== storedId) pending = true;
+  if (stored === 'default') {
+    // Manda lo que la app usa de verdad: si ya no es el del sistema (p. ej. se cambió dentro de Zoom o con la
+    // app cerrada), se muestra ese dispositivo y no "Predeterminado".
+    deviceId = detected && detected !== defId ? detected : '';
+    pending = !!detected && detected !== defId;
+    // Si pasa un buen rato usando otro dispositivo sin que haya cambiado el del sistema, lo cambiaron por fuera
+    // (en la propia app o con esta cerrada): se deja de forzar "Predeterminado".
+    if (pending) {
+      const since = mismatchSince.get(storeKey) || Date.now();
+      mismatchSince.set(storeKey, since);
+      if (Date.now() - since > 20000 && Date.now() - lastDefChangeAt > 20000) {
+        appDevices.delete(storeKey); persistAppDevices(); mismatchSince.delete(storeKey); pending = false;
+      }
+    } else mismatchSince.delete(storeKey);
+  } else if (storedId && detected && detected !== storedId) pending = true;
   const at = appDeviceAt.get(storeKey);
   if (stored && at && Date.now() - at < 6000) deviceId = stored === 'default' ? '' : storedId;
   return { deviceId, deviceRaw: sess.deviceRaw, pending };
@@ -489,7 +506,8 @@ function checkDefaults(st) {
   for (const kind of ['input', 'output']) {
     const d = (st[kind] || []).find((x) => x.isDefault);
     if (!d) continue;
-    if (lastDef[kind] !== d.id) { lastDef[kind] = d.id; followDefaults(kind).catch(() => {}); }
+    if (lastDef[kind] === null) { lastDef[kind] = d.id; continue; }   // al abrir la app solo se toma nota: no se pisa lo que cambiaste con ella cerrada
+    if (lastDef[kind] !== d.id) { lastDef[kind] = d.id; lastDefChangeAt = Date.now(); followDefaults(kind).catch(() => {}); }
   }
 }
 ipcMain.handle('apps:setMute', async (_, t, muted) => {
@@ -1420,8 +1438,10 @@ function createWindow() {
   win.on('resize', rememberBounds);
   win.on('move', rememberBounds);
 
-  win.on('focus', () => win.webContents.send('ui:shown'));
-  win.on('restore', () => win.webContents.send('ui:shown'));
+  // Al volver a mostrar la ventana se descarta lo leído antes: así lo que ves es lo actual.
+  win.on('show', () => { invalidateRows(); micUse.at = 0; });
+  win.on('focus', () => { invalidateRows(); win.webContents.send('ui:shown'); });
+  win.on('restore', () => { invalidateRows(); win.webContents.send('ui:shown'); });
 
   win.on('close', (e) => {
     try { settings.bounds = win.getNormalBounds(); saveSettings(); } catch {}
