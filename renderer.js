@@ -465,9 +465,9 @@ let sysOrder = '';
 /* Umbrales de color: [aviso (ámbar), crítico (rojo)]. Cámbialos aquí si quieres más o menos sensibilidad. */
 const LIMITS = {
   usage: [70, 90],     // uso de CPU / GPU (%)
-  cpuTemp: [80, 90],   // °C
-  gpuTemp: [75, 85],   // °C
-  hottest: [80, 92],   // °C, sensor más caliente
+  cpuTemp: [85, 95],   // °C (los CPU de laptop suelen limitarse cerca de 100 °C)
+  gpuTemp: [80, 87],   // °C, núcleo de la GPU (las GPU de laptop de esta generación reportan 87 °C como máximo operativo)
+  hottest: [90, 100],  // °C, sensor más caliente (incluye el "Hot Spot" de la GPU, que va más alto que el núcleo)
   ram: [75, 90],       // % de RAM usada
   vram: [75, 92],      // % de VRAM usada
 };
