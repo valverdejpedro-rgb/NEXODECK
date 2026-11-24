@@ -16,7 +16,7 @@ let tray = null;
 let quitting = false;
 let settings = {};
 let updateStatus = { state: 'idle' };
-const micWatch = { id: '', vol: null, lastSetAt: 0, log: [], timer: null, busy: false };
+const micWatch = { id: '', vol: null, lastSetAt: 0, log: [], timer: null, busy: false, lastDefSetAt: 0, defLog: [] };
 
 const SVCL = app.isPackaged
   ? path.join(process.resourcesPath, 'svcl.exe')
@@ -243,7 +243,7 @@ ipcMain.handle('audio:toggleMute', async (_, id, muted) => {
   }
   return svcl(['/Switch', id]);
 });
-ipcMain.handle('audio:setDefault', (_, id) => { if (!validId(id)) return; invalidateRows(); return svcl(['/SetDefault', id, 'all']); });
+ipcMain.handle('audio:setDefault', (_, id) => { if (!validId(id)) return; micWatch.lastDefSetAt = Date.now(); invalidateRows(); return svcl(['/SetDefault', id, 'all']); });
 
 /* ---------- Audio por aplicación ---------- */
 
@@ -449,6 +449,31 @@ function micUsers(rows) {
   return [...names];
 }
 
+// Windows guarda aquí el dispositivo "fijado" para cada programa (lo que hace /SetAppDefault). Si una app tiene
+// uno fijado, ignora el dispositivo predeterminado del sistema.
+function readAppPins() {
+  return new Promise((resolve) => {
+    execFile('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Internet Explorer\\LowRegistry\\Audio\\PolicyConfig\\PropertyStore', '/s'],
+      { windowsHide: true, timeout: 5000, maxBuffer: 8 * 1024 * 1024 }, (err, so) => {
+        if (err) return resolve(null);
+        const keys = [];
+        let cur = null;
+        for (const line of String(so).split(/\r?\n/)) {
+          if (/^HKEY_/i.test(line)) { cur = { key: line.trim().split('\\').slice(-2).join('\\'), exe: '', devs: [] }; keys.push(cur); continue; }
+          if (!cur) continue;
+          const m = line.match(/REG_(?:BINARY|SZ)\s+(\S.*)$/);
+          if (!m) continue;
+          const raw = m[1].trim();
+          const txt = /^[0-9a-f]+$/i.test(raw) && raw.length % 2 === 0 ? Buffer.from(raw, 'hex').toString('utf16le') : raw;
+          const exe = txt.match(/[A-Za-z]:\\[^\0"<>|?*]*?\.exe/i);
+          if (exe) cur.exe = exe[0];
+          for (const d of txt.matchAll(/\{0\.0\.[01]\.00000000\}\.\{[0-9a-f-]{36}\}/gi)) cur.devs.push(d[0]);
+        }
+        resolve(keys.filter((k) => k.exe || k.devs.length));
+      });
+  });
+}
+
 async function micWatchTick() {
   if (micWatch.busy) return;
   micWatch.busy = true;
@@ -456,7 +481,13 @@ async function micWatchTick() {
     const rows = await readItems();
     const def = (await listDevices(rows)).input.find((d) => d.isDefault);
     if (!def) { micWatch.id = ''; micWatch.vol = null; return; }
-    if (def.id !== micWatch.id) { micWatch.id = def.id; micWatch.vol = def.volume; return; }
+    if (def.id !== micWatch.id) {
+      if (micWatch.id && Date.now() - micWatch.lastDefSetAt > 8000) {
+        micWatch.defLog.push({ at: new Date().toLocaleTimeString('es'), from: micWatch.id, to: def.name, apps: micUsers(rows) });
+        if (micWatch.defLog.length > 20) micWatch.defLog.shift();
+      }
+      micWatch.id = def.id; micWatch.vol = def.volume; return;
+    }
     const ours = Date.now() - micWatch.lastSetAt < 8000;
     if (micWatch.vol != null && def.volume <= micWatch.vol - 3 && !ours) {
       micWatch.log.push({
@@ -471,7 +502,7 @@ async function micWatchTick() {
 
 function startMicWatch() {
   if (micWatch.timer) return;
-  micWatch.timer = setInterval(micWatchTick, 5000);
+  micWatch.timer = setInterval(micWatchTick, 2000);
 }
 
 /* ---------- Audífonos Corsair (preset de ecualizador y batería, vía SDK de iCUE) ---------- */
@@ -1185,6 +1216,25 @@ $s.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 5 | Fo
     if (!n) L.push('Ninguna aplicación tiene sesión de entrada ahora mismo.');
     L.push(`Programas con registro de micrófono en Windows: ${[...mic.keys()].slice(0, 12).join(', ') || '(ninguno; no se pudo leer)'}`);
   } catch (e) { L.push('No se pudo leer: ' + e.message); }
+
+  L.push('', '── Dispositivos fijados por aplicación (si una app tiene uno fijado, ignora el predeterminado de Windows) ──');
+  try {
+    const pins = await readAppPins();
+    const st = await listDevices(await getRows(0));
+    const all = [...st.output, ...st.input];
+    const nameOf = (devId) => {
+      const g = (devId.match(/\{[0-9a-f-]{36}\}\s*$/i) || [''])[0].toLowerCase();
+      const d = all.find((x) => { const it = (itemIds.get(x.id) || '').toLowerCase(); return it && g && it.endsWith(g); });
+      return d ? `${d.name} (${/\{0\.0\.1\./.test(devId) ? 'entrada' : 'salida'})` : devId;
+    };
+    if (pins === null) L.push('No se pudo leer el registro de Windows.');
+    else if (!pins.length) L.push('Ninguna aplicación tiene un dispositivo fijado.');
+    else for (const k of pins.slice(0, 25)) L.push(`${k.exe ? path.win32.basename(k.exe) : '(sin ruta) ' + k.key} → ${[...new Set(k.devs)].map(nameOf).join(' · ') || 'sin dispositivo'}`);
+  } catch (e) { L.push('No se pudo leer: ' + e.message); }
+
+  L.push('', '── Cambios del micrófono predeterminado que NO hizo esta app ──');
+  if (!micWatch.defLog.length) L.push('Ninguno desde que se abrió la app (vigila cada 2 s).');
+  else for (const m of micWatch.defLog.slice(-10)) L.push(`${m.at} · cambió a "${m.to}" · usando el micrófono: ${m.apps.join(', ') || 'ningún programa'}`);
 
   L.push('', '── Volumen del micrófono: bajadas que NO hizo esta app ──');
   if (!micWatch.log.length) L.push('Ninguna detectada desde que se abrió la app (vigila cada 5 s).');
