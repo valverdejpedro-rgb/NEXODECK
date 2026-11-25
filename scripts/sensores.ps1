@@ -144,8 +144,11 @@ try {
       }
       $sinceStart = ((Get-Date) - $pmStart).TotalSeconds
       # Si se cierra solo, se reintenta como máximo cada 15 s (así no se borra el CSV en bucle).
-      # PresentMon escribe una fila por fotograma: se reinicia cada 20 min para que el archivo no crezca sin límite.
-      if ((-not $pmProc) -or ($exited -and $sinceStart -ge 15) -or ($sinceStart -ge 1200)) {
+      # PresentMon escribe una fila por fotograma. Se reinicia solo si el archivo se vuelve enorme (más de 150 MB):
+      # reiniciarlo por tiempo cortaba los FPS en pleno juego.
+      $csvBig = $false
+      try { $csvBig = ((Get-Item -LiteralPath $csv -ErrorAction Stop).Length -ge 150MB) } catch {}
+      if ((-not $pmProc) -or ($exited -and $sinceStart -ge 15) -or ($csvBig -and $sinceStart -ge 600)) {
         $script:pmRestarts++
         $script:pmLastExit = $null
         $pmProc = Start-OurPresentMon
