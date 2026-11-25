@@ -622,7 +622,6 @@ async function refreshPower() {
 
 /* ---------- Estado del sistema ---------- */
 
-const sysGridEl = document.getElementById('home-sys');
 const sysErrorEl = document.getElementById('sys-error');
 const sysBannerEl = document.getElementById('sys-banner');
 const sysBannerText = document.getElementById('sys-banner-text');
@@ -630,10 +629,8 @@ const sysEnableBtn = document.getElementById('sys-enable');
 const sysGameEl = document.getElementById('sys-game');
 const homeAlertEl = document.getElementById('home-alert');
 const homeAlertList = document.getElementById('home-alert-list');
-const sysCards = {};
 let sysBusy = false;
 let sysEnabling = false;
-let sysOrder = '';
 
 /* Umbrales de color: [aviso (ámbar), crítico (rojo)]. Cámbialos aquí si quieres más o menos sensibilidad. */
 const LIMITS = {
@@ -645,79 +642,12 @@ const LIMITS = {
   vram: [75, 92],      // % de VRAM usada
 };
 
-function buildStat(title) {
-  const el = document.createElement('section');
-  el.className = 'panel stat';
-  el.innerHTML = `
-    <div class="stat-head"><span class="stat-title"></span><span class="stat-sub"></span></div>
-    <div class="stat-row"><span class="big">–</span><span class="unit"></span><span class="temp"></span></div>
-    <div class="bar"><i></i></div>
-    <p class="stat-note"></p>`;
-  el.querySelector('.stat-title').textContent = title;
-  return {
-    el,
-    title: el.querySelector('.stat-title'),
-    sub: el.querySelector('.stat-sub'),
-    row: el.querySelector('.stat-row'),
-    big: el.querySelector('.big'),
-    unit: el.querySelector('.unit'),
-    temp: el.querySelector('.temp'),
-    barWrap: el.querySelector('.bar'),
-    bar: el.querySelector('.bar i'),
-    note: el.querySelector('.stat-note'),
-  };
-}
-function mkStat(id, title) {
-  sysCards[id] = buildStat(title);
-  if (id === 'fans') {
-    const c = sysCards.fans;
-    c.el.classList.add('fans');
-    c.list = document.createElement('ul');
-    c.list.className = 'fan-list';
-    c.row.hidden = true;
-    c.barWrap.hidden = true;
-    c.el.insertBefore(c.list, c.note);
-  }
-}
-
-// Crea las tarjetas que faltan, quita las que sobran y las coloca en orden (solo toca el DOM si cambió algo)
-function syncCards(ids, titles) {
-  for (const id of ids) {
-    if (!sysCards[id]) mkStat(id, titles[id]);
-    else if (sysCards[id].title.textContent !== titles[id]) sysCards[id].title.textContent = titles[id];
-  }
-  for (const id of Object.keys(sysCards)) {
-    if (!ids.includes(id)) { sysCards[id].el.remove(); delete sysCards[id]; }
-  }
-  const key = ids.join('|');
-  if (key !== sysOrder) {
-    sysOrder = key;
-    for (const id of ids) sysGridEl.appendChild(sysCards[id].el);
-  }
-}
-
-// ok / warm / hot según los umbrales
 const level = (v, lim) => (v == null ? '' : v >= lim[1] ? 'hot' : v >= lim[0] ? 'warm' : 'ok');
 // Si el chip informa su límite real de temperatura, los umbrales se calculan a partir de él
 // (ámbar a 10 °C del límite, rojo a 3 °C); si no lo informa, se usan los valores fijos de LIMITS.
 const limitsFor = (maxT, fixed) => (maxT && maxT > 60 ? [maxT - 10, maxT - 3] : fixed);
 const fmtT = (t) => (t == null ? '' : `${Math.round(t)} °C`);
 const gb = (mb) => (mb / 1024).toFixed(1);
-
-function setStat(id, o) { setStatOn(sysCards[id], o); }
-function setStatOn(c, o) {
-  c.sub.textContent = o.sub || '';
-  c.big.textContent = o.big == null ? '–' : o.big;
-  c.unit.textContent = o.unit || '';
-  c.temp.textContent = o.temp || '';
-  c.temp.dataset.level = o.tempLevel || '';
-  c.barWrap.hidden = o.pct == null;
-  if (o.pct != null) c.bar.style.width = Math.max(0, Math.min(100, o.pct)) + '%';
-  c.el.dataset.level = o.level || '';
-  c.el.dataset.alert = o.alert || '';
-  c.note.textContent = o.note || '';
-  c.note.hidden = !o.note;
-}
 
 /* Juego: FPS actual, más bajo / más alto y gráfica que usa */
 const GAME_TEMPLATE = `
@@ -749,8 +679,8 @@ const GAME_TEMPLATE = `
         <button class="mini reset-range" type="button">Reiniciar</button>
       </div>
     </div>
-    <div class="game-metrics"></div>
-  </div>`;
+  </div>
+  <div class="game-metrics"></div>`;
 sysGameEl.innerHTML = GAME_TEMPLATE;
 // El aviso de sensores vive dentro del espacio del juego (así no ocupa lugar aparte).
 sysGameEl.querySelector('.idle-text').appendChild(sysBannerEl);
@@ -787,15 +717,30 @@ gm.prefBtns.forEach((b) => b.addEventListener('click', async () => {
   else gm.hint.textContent = 'Guardado. Cierra el juego y vuelve a abrirlo para que Windows use esta gráfica.';
 }));
 
-// Tarjetitas de datos en vivo dentro del espacio del juego
-function metricChip(label, value, sub, lv) {
+// Tarjetita de datos: siempre visible bajo los FPS (haya juego o no)
+function metricChip(o) {
   const d = document.createElement('div');
   d.className = 'chip';
-  d.dataset.level = lv || '';
-  const l = document.createElement('span'); l.className = 'chip-lbl'; l.textContent = label;
-  const v = document.createElement('b'); v.className = 'chip-val'; v.textContent = value;
-  d.append(l, v);
-  if (sub) { const u = document.createElement('span'); u.className = 'chip-sub'; u.textContent = sub; d.append(u); }
+  d.dataset.level = o.level || '';
+  if (o.wide) d.classList.add('wide');
+  const head = document.createElement('div'); head.className = 'chip-head';
+  const l = document.createElement('span'); l.className = 'chip-lbl'; l.textContent = o.label;
+  const sub = document.createElement('span'); sub.className = 'chip-sub'; sub.textContent = o.sub || '';
+  head.append(l, sub);
+  const row = document.createElement('div'); row.className = 'chip-row';
+  const v = document.createElement('b'); v.className = 'chip-val'; v.textContent = o.value == null ? '–' : o.value;
+  const u = document.createElement('span'); u.className = 'chip-unit'; u.textContent = o.unit || '';
+  const t = document.createElement('span'); t.className = 'chip-temp'; t.textContent = o.temp || '';
+  if (o.tempLevel) t.dataset.level = o.tempLevel;
+  row.append(v, u, t);
+  d.append(head, row);
+  if (o.pct != null) {
+    const bar = document.createElement('div'); bar.className = 'chip-bar';
+    const i = document.createElement('i'); i.style.width = `${Math.max(0, Math.min(100, o.pct))}%`;
+    bar.append(i); d.append(bar);
+  } else if (o.note) {
+    const n = document.createElement('p'); n.className = 'chip-note'; n.textContent = o.note; d.append(n);
+  }
   return d;
 }
 
@@ -807,7 +752,7 @@ function renderGame(s) {
   sysGameEl.classList.toggle('live', !!g);
   if (!g) {
     gm.idleMsg.textContent = s.sensors.helper
-      ? 'Abre un juego y aquí verás sus FPS, temperaturas y uso del equipo en tiempo real.'
+      ? 'Abre un juego y aquí aparecerán sus FPS en tiempo real.'
       : '';   // sin sensores, el aviso de abajo ya explica qué hacer
     prefSent = null;
     return;
@@ -816,23 +761,6 @@ function renderGame(s) {
   gm.fps.textContent = Math.round(g.fps);
   gm.min.textContent = g.min == null ? '–' : Math.round(g.min);
   gm.max.textContent = g.max == null ? '–' : Math.round(g.max);
-
-  // Datos en vivo del equipo mientras se juega
-  const chips = [];
-  const multi = s.gpus.length > 1;
-  s.gpus.forEach((gp, i) => {
-    const nm = multi ? `GPU ${i + 1}` : 'GPU';
-    chips.push(metricChip(nm, gp.usage == null ? '–' : `${Math.round(gp.usage)}%`, fmtT(gp.temp), level(gp.usage, LIMITS.usage)));
-    if (gp.vramTotal) {
-      const vp = (gp.vramUsed / gp.vramTotal) * 100;
-      chips.push(metricChip(multi ? `VRAM ${i + 1}` : 'VRAM', gb(gp.vramUsed), `de ${gb(gp.vramTotal)} GB`, level(vp, LIMITS.vram)));
-    }
-  });
-  chips.splice(Math.min(1, chips.length), 0, metricChip('CPU', `${Math.round(s.cpu.usage)}%`, fmtT(s.cpu.temp), level(s.cpu.usage, LIMITS.usage)));
-  const rp = (s.ram.used / s.ram.total) * 100;
-  chips.push(metricChip('RAM', gb(s.ram.used / 1048576), `de ${gb(s.ram.total / 1048576)} GB`, level(rp, LIMITS.ram)));
-  if (s.general) chips.push(metricChip('Caliente', `${Math.round(s.general.value)}°`, s.general.name, level(s.general.value, LIMITS.hottest)));
-  gm.metrics.replaceChildren(...chips);
 
   // Gráfica en uso y si conviene cambiarla
   const gp = g.gpu;
@@ -896,16 +824,12 @@ function updateAlerts(found) {
   }
 }
 
-function setBattery(b, alerts) {
+function batteryChip(b, alerts) {
   const pct = Math.round(b.level * 100);
   const lvl = b.charging ? 'ok' : pct <= 15 ? 'hot' : pct <= 30 ? 'warm' : 'ok';
-  const left = b.charging ? (b.level < 1 ? fmtDur(b.chargingTime) : '') : fmtDur(b.dischargingTime);
-  setStat('bat', {
-    sub: b.charging ? (b.level >= 1 ? 'Conectada' : 'Cargando') : 'Usando batería',
-    big: pct, unit: '%', pct, level: lvl,
-    note: left ? (b.charging ? `Carga completa en ${left}` : `Quedan unos ${left}`) : '',
-  });
+  const left = b.charging ? '' : fmtDur(b.dischargingTime);
   if (!b.charging && pct <= 15) alerts.push({ key: 'bat', msg: `Batería baja: ${pct}%.` });
+  return { label: 'Batería', sub: b.charging ? (b.level >= 1 ? 'Conectada' : 'Cargando') : (left ? `Quedan ${left}` : 'En batería'), value: pct, unit: '%', pct, level: lvl };
 }
 
 function fmtDur(sec) {
@@ -916,90 +840,73 @@ function fmtDur(sec) {
 
 function renderSystem(s, b) {
   const alerts = [];
-  const ids = [];
-  const titles = { bat: 'Batería', cpu: 'CPU', ram: 'RAM', general: 'Punto más caliente', fans: 'Ventiladores' };
-  if (b) ids.push('bat');
+  const chips = [];
   if (!s) {                                  // sin lecturas del sistema: solo se muestra la batería
-    syncCards(ids, titles);
-    if (b) setBattery(b, alerts);
+    if (b) chips.push(batteryChip(b, alerts));
+    gm.metrics.replaceChildren(...chips.map(metricChip));
     updateAlerts(alerts);
     return;
   }
   const { cpu, gpus, ram } = s;
   const multi = gpus.length > 1;
-  ids.push('cpu');
-  gpus.forEach((g, i) => {
-    ids.push(`gpu${i}`);
-    titles[`gpu${i}`] = multi ? `GPU ${i + 1}` : 'GPU';
-    if (g.vramTotal) { ids.push(`vram${i}`); titles[`vram${i}`] = multi ? `VRAM · GPU ${i + 1}` : 'VRAM'; }
-  });
-  ids.push('ram', 'general', 'fans');
-  if (!gpus.length) { ids.splice(ids.indexOf('cpu') + 1, 0, 'gpu0'); titles.gpu0 = 'GPU'; }
-  syncCards(ids, titles);
-  if (b) setBattery(b, alerts);
+  const gpuName = (n) => (n || '').replace(/^NVIDIA\s+/i, '').replace(/GeForce\s+/i, '').replace(/^AMD\s+/i, '').replace(/\s*\(TM\)/gi, '');
 
-  const cpuTempLv = level(cpu.temp, limitsFor(cpu.tempLimit, LIMITS.cpuTemp));
-  setStat('cpu', {
-    sub: `${cpu.cores} hilos`,
-    big: Math.round(cpu.usage), unit: '%',
-    temp: fmtT(cpu.temp), tempLevel: cpuTempLv, alert: cpuTempLv,
-    pct: cpu.usage, level: level(cpu.usage, LIMITS.usage),
-    note: cpu.temp == null ? 'Temperatura: activa los sensores avanzados' : '',
-  });
-  if (cpuTempLv === 'hot') alerts.push({ key: 'cpu-temp', msg: `CPU a ${Math.round(cpu.temp)} °C: está muy caliente.` });
-
-  if (!gpus.length) {
-    setStat('gpu0', { note: 'No se detectó ninguna tarjeta gráfica.' });
-  }
+  // Orden: GPU, VRAM, CPU, RAM, (otras GPU), batería, punto más caliente, ventiladores
+  const gpuChips = [];
+  if (!gpus.length) gpuChips.push([{ label: 'GPU', note: 'No se detectó ninguna tarjeta gráfica.' }]);
   gpus.forEach((g, i) => {
     const label = multi ? `GPU ${i + 1}` : 'GPU';
     const hasData = g.usage != null || g.temp != null;
     const tLv = level(g.temp, limitsFor(g.tempLimit, LIMITS.gpuTemp));
-    setStat(`gpu${i}`, {
-      sub: (g.name || '').replace(/^NVIDIA\s+/i, '').replace(/GeForce\s+/i, '').replace(/^AMD\s+/i, '').replace(/\s*\(TM\)/gi, ''),
-      big: g.usage == null ? null : Math.round(g.usage), unit: g.usage == null ? '' : '%',
-      temp: fmtT(g.temp), tempLevel: tLv, alert: tLv,
+    const list = [{
+      label, sub: gpuName(g.name),
+      value: g.usage == null ? null : Math.round(g.usage), unit: g.usage == null ? '' : '%',
+      temp: fmtT(g.temp), tempLevel: tLv,
       pct: g.usage, level: level(g.usage, LIMITS.usage),
-      note: g.tempShared ? 'Integrada: muestra la temperatura del chip' : (hasData ? '' : 'Detectada. Activa los sensores avanzados para ver su uso y temperatura.'),
-    });
+      note: g.tempShared ? 'Integrada: temperatura del chip' : (hasData ? '' : 'Activa los sensores avanzados'),
+    }];
     if (tLv === 'hot') alerts.push({ key: `gpu-temp-${i}`, msg: `${label} a ${Math.round(g.temp)} °C: está muy caliente.` });
     if (g.vramTotal) {
       const pct = (g.vramUsed / g.vramTotal) * 100;
       const lv = level(pct, LIMITS.vram);
-      setStat(`vram${i}`, {
-        big: gb(g.vramUsed), unit: `/ ${gb(g.vramTotal)} GB`,
-        pct, level: lv,
-      });
+      list.push({ label: multi ? `VRAM ${i + 1}` : 'VRAM', value: gb(g.vramUsed), unit: `/ ${gb(g.vramTotal)} GB`, pct, level: lv });
       if (lv === 'hot') alerts.push({ key: `vram-${i}`, msg: `Memoria de video casi llena${multi ? ` (${label})` : ''}: ${Math.round(pct)}%.` });
     }
+    gpuChips.push(list);
   });
+
+  const cpuTempLv = level(cpu.temp, limitsFor(cpu.tempLimit, LIMITS.cpuTemp));
+  const cpuChip = {
+    label: 'CPU', sub: `${cpu.cores} hilos`,
+    value: Math.round(cpu.usage), unit: '%',
+    temp: fmtT(cpu.temp), tempLevel: cpuTempLv,
+    pct: cpu.usage, level: level(cpu.usage, LIMITS.usage),
+  };
+  if (cpuTempLv === 'hot') alerts.push({ key: 'cpu-temp', msg: `CPU a ${Math.round(cpu.temp)} °C: está muy caliente.` });
 
   const ramPct = (ram.used / ram.total) * 100;
   const ramLv = level(ramPct, LIMITS.ram);
-  setStat('ram', {
-    sub: `${gb(ram.total / 1048576)} GB en total`,
-    big: gb(ram.used / 1048576), unit: 'GB',
-    pct: ramPct, level: ramLv,
-  });
+  const ramChip = { label: 'RAM', sub: `de ${gb(ram.total / 1048576)} GB`, value: gb(ram.used / 1048576), unit: 'GB', pct: ramPct, level: ramLv };
   if (ramLv === 'hot') alerts.push({ key: 'ram', msg: `RAM casi llena: ${Math.round(ramPct)}% en uso.` });
 
   const hotLv = s.general ? level(s.general.value, LIMITS.hottest) : '';
-  setStat('general', s.general ? {
-    sub: s.general.name,
-    big: Math.round(s.general.value), unit: '°C',
-    level: hotLv,
-  } : { note: 'Activa los sensores avanzados para ver las temperaturas' });
+  const hotChip = s.general
+    ? { label: 'Más caliente', sub: s.general.name, value: Math.round(s.general.value), unit: '°C', level: hotLv }
+    : { label: 'Más caliente', note: 'Activa los sensores avanzados' };
   if (hotLv === 'hot') alerts.push({ key: 'hottest', msg: `Un sensor llegó a ${Math.round(s.general.value)} °C (${s.general.name}).` });
 
-  const fans = sysCards.fans;
-  const rows = s.fans.map((f) => `${f.name}: ${f.rpm} RPM`);
-  gpus.forEach((g, i) => { if (g.fan != null) rows.push(`${multi ? `GPU ${i + 1}` : 'GPU'}: ${Math.round(g.fan)}%`); });
-  fans.list.replaceChildren(...rows.map((t) => { const li = document.createElement('li'); li.textContent = t; return li; }));
-  fans.list.hidden = !rows.length;
-  fans.note.hidden = rows.length > 0;
-  fans.note.textContent = s.sensors.lhm
-    ? 'Este equipo no expone la velocidad de sus ventiladores.'
-    : 'Activa los sensores avanzados para ver los ventiladores';
+  const rpm = s.fans.map((f) => f.rpm);
+  const gpuFan = [];
+  gpus.forEach((g, i) => { if (g.fan != null) gpuFan.push(`${multi ? `GPU ${i + 1}` : 'GPU'} ${Math.round(g.fan)}%`); });
+  let fanChip;
+  if (rpm.length) fanChip = { wide: true, label: 'Ventiladores', sub: gpuFan.join(', '), value: rpm.join(' · '), unit: 'RPM' };
+  else if (gpuFan.length) fanChip = { wide: true, label: 'Ventiladores', sub: 'GPU', value: gpuFan.map((t) => t.replace(/^GPU( \d)? /, '')).join(' · ') };
+  else fanChip = { wide: true, label: 'Ventiladores', note: s.sensors.lhm ? 'Este equipo no los expone' : 'Activa los sensores avanzados' };
+
+  chips.push(...gpuChips[0], cpuChip, ramChip, ...gpuChips.slice(1).flat());
+  if (b) chips.push(batteryChip(b, alerts));
+  chips.push(hotChip, fanChip);
+  gm.metrics.replaceChildren(...chips.map(metricChip));
 
   updateAlerts(alerts);
   renderBanner(s);

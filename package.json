@@ -1,7 +1,7 @@
 {
   "name": "centro-control-pc",
   "productName": "Centro de Control",
-  "version": "1.0.24",
+  "version": "1.0.25",
   "description": "Centro de control de PC: volumen y dispositivos de audio desde una barra",
   "main": "main.js",
   "author": "Pedro",

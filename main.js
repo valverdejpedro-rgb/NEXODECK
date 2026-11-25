@@ -1012,11 +1012,39 @@ function buildGpus(nvidia, lhmSensors, cpuTemp) {
 // GPU "como el Administrador de tareas": uso = el motor más ocupado de cada tarjeta (3D, Compute, Copy, Video…)
 // y VRAM = "Memoria dedicada" que Windows lleva por tarjeta. Son los mismos contadores que usa el Administrador de
 // tareas; nvidia-smi mide otra cosa (por eso no coincidían). Se leen con un PowerShell que queda abierto.
-const gpuTm = { usage: new Map(), mem: new Map(), at: 0, proc: null, startedAt: 0, buf: '', tmpU: new Map(), tmpM: new Map() };
+const gpuTm = { usage: new Map(), mem: new Map(), temp: new Map(), at: 0, proc: null, startedAt: 0, buf: '', tmpU: new Map(), tmpM: new Map(), tmpT: new Map() };
 function startGpuTm() {
   if (gpuTm.proc || process.platform !== 'win32' || Date.now() - gpuTm.startedAt < 15000) return;
   gpuTm.startedAt = Date.now();
   const script = `$ErrorActionPreference = 'SilentlyContinue'
+$kmtOk = $false
+try {
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class Kmt {
+  [StructLayout(LayoutKind.Sequential)] struct OpenA { public uint Lo; public int Hi; public uint H; }
+  [StructLayout(LayoutKind.Sequential)] struct QueryA { public uint H; public int Type; public IntPtr Data; public uint Size; }
+  [StructLayout(LayoutKind.Sequential)] struct CloseA { public uint H; }
+  [DllImport("gdi32.dll")] static extern int D3DKMTOpenAdapterFromLuid(ref OpenA a);
+  [DllImport("gdi32.dll")] static extern int D3DKMTQueryAdapterInfo(ref QueryA q);
+  [DllImport("gdi32.dll")] static extern int D3DKMTCloseAdapter(ref CloseA c);
+  public static int TempDeci(uint lo, int hi) {
+    OpenA o = new OpenA(); o.Lo = lo; o.Hi = hi;
+    if (D3DKMTOpenAdapterFromLuid(ref o) != 0) return -1;
+    IntPtr buf = Marshal.AllocHGlobal(128);
+    int res = -1;
+    try {
+      for (int i = 0; i < 128; i += 8) Marshal.WriteInt64(buf, i, 0);
+      QueryA q = new QueryA(); q.H = o.H; q.Type = 62; q.Data = buf; q.Size = 64;
+      if (D3DKMTQueryAdapterInfo(ref q) == 0) res = Marshal.ReadInt32(buf, 56);
+    } finally { Marshal.FreeHGlobal(buf); CloseA c = new CloseA(); c.H = o.H; D3DKMTCloseAdapter(ref c); }
+    return res;
+  }
+}
+'@
+  $kmtOk = $true
+} catch {}
 while ($true) {
   $eng = @{}
   Get-CimInstance -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine | ForEach-Object {
@@ -1025,7 +1053,14 @@ while ($true) {
   $out = New-Object System.Text.StringBuilder
   foreach ($k in $eng.Keys) { [void]$out.AppendLine('ENG|' + $k + '|' + $eng[$k]) }
   Get-CimInstance -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory | ForEach-Object {
-    if ($_.Name -match '^(luid_0x[0-9a-fA-F]+_0x[0-9a-fA-F]+)_phys_\\d+') { [void]$out.AppendLine('MEM|' + $matches[1] + '|' + $_.DedicatedUsage) }
+    if ($_.Name -match '^(luid_0x([0-9a-fA-F]+)_0x([0-9a-fA-F]+))_phys_\\d+') {
+      [void]$out.AppendLine('MEM|' + $matches[1] + '|' + $_.DedicatedUsage)
+      if ($kmtOk) {
+        $t = -1
+        try { $t = [Kmt]::TempDeci([Convert]::ToUInt32($matches[3], 16), [Convert]::ToInt32($matches[2], 16)) } catch {}
+        [void]$out.AppendLine('TMP|' + $matches[1] + '|' + $t)
+      }
+    }
   }
   [void]$out.AppendLine('END')
   try { [Console]::Out.Write($out.ToString()); [Console]::Out.Flush() } catch { break }
@@ -1045,8 +1080,8 @@ while ($true) {
           // por tarjeta: el motor más ocupado
           const usage = new Map();
           for (const [k, v] of gpuTm.tmpU) usage.set(k, Math.max(usage.get(k) || 0, v));
-          gpuTm.usage = usage; gpuTm.mem = gpuTm.tmpM; gpuTm.at = Date.now();
-          gpuTm.tmpU = new Map(); gpuTm.tmpM = new Map();
+          gpuTm.usage = usage; gpuTm.mem = gpuTm.tmpM; gpuTm.temp = gpuTm.tmpT; gpuTm.at = Date.now();
+          gpuTm.tmpU = new Map(); gpuTm.tmpM = new Map(); gpuTm.tmpT = new Map();
           continue;
         }
         let m = l.match(/^ENG\|luid_0x([0-9a-f]+)_0x([0-9a-f]+)_phys_\d+_eng_\d+\|([\d.,]+)/i);
@@ -1058,7 +1093,14 @@ while ($true) {
           continue;
         }
         m = l.match(/^MEM\|luid_0x([0-9a-f]+)_0x([0-9a-f]+)\|(\d+)/i);
-        if (m) gpuTm.tmpM.set(luidKey(m[1], m[2]), Number(m[3]));
+        if (m) { gpuTm.tmpM.set(luidKey(m[1], m[2]), Number(m[3])); continue; }
+        m = l.match(/^TMP\|luid_0x([0-9a-f]+)_0x([0-9a-f]+)\|(-?\d+)/i);
+        if (m) {
+          // Windows la da en décimas de grado; se aceptan solo valores creíbles
+          const raw = Number(m[3]);
+          const t = raw >= 150 ? raw / 10 : raw;
+          if (t >= 10 && t <= 130) gpuTm.tmpT.set(luidKey(m[1], m[2]), t);
+        }
       }
     });
     const gone = () => { if (gpuTm.proc === proc) { gpuTm.proc = null; gpuTm.at = 0; } };
@@ -1090,6 +1132,10 @@ function applyTaskManagerGpu(gpus) {
     if (u != null) { c.usageSmi = g.usage; c.usage = Math.min(100, u); c.usageSource = 'windows'; }
     const ded = gpuTm.mem.get(key);
     if (ded != null && g.vramTotal) { c.vramSmi = g.vramUsed; c.vramUsed = Math.min(g.vramTotal, ded / 1048576); }
+    // Temperatura propia de la tarjeta según Windows (así una AMD integrada ya no copia la temperatura de la CPU).
+    // En NVIDIA se conserva la de nvidia-smi, que es la misma.
+    const tw = gpuTm.temp.get(key);
+    if (tw != null && g.vendor !== 'nvidia') { c.tempOld = g.temp; c.temp = tw; c.tempShared = false; c.tempSource = 'windows'; }
     return c;
   });
 }
@@ -1248,20 +1294,30 @@ function ingestFps() {
   }
 }
 
+// Último juego visto: evita que los FPS parpadeen cuando PresentMon entrega los datos a ráfagas.
+let lastGame = null;
 function currentGame() {
   const now = Date.now();
-  let best = null;
+  const cands = [];
   for (const [name, a] of fpsState.apps) {
     const base = name.replace(/\.exe$/i, '');
     if (NOT_GAMES.test(base)) continue;
-    const recent = a.frames.filter((f) => now - f.t < 3000);
-    if (recent.length < 5) continue;
-    const mean = recent.reduce((s, f) => s + f.ft, 0) / recent.length;
+    let win = a.frames.filter((f) => now - f.t < 3000);
+    if (win.length < 5) win = a.frames.filter((f) => now - f.t < 8000);   // pocos fotogramas recientes: se promedia una ventana más larga
+    if (win.length < 3) continue;
+    const mean = win.reduce((s, f) => s + f.ft, 0) / win.length;
     const fps = 1000 / mean;
-    if (fps < 5) continue;
-    if (!best || fps > best.fps) best = { app: name, name: base, fps, pid: a.pid || 0, batch: a.batch || null };
+    if (fps < 2) continue;
+    cands.push({ app: name, name: base, fps, pid: a.pid || 0, batch: a.batch || null });
   }
-  return best;
+  // Si el juego anterior sigue activo se queda ese (no salta a otra ventana con más fotogramas).
+  let best = lastGame ? cands.find((c) => c.app === lastGame.app) || null : null;
+  if (!best) for (const c of cands) if (!best || c.fps > best.fps) best = c;
+  if (best) { lastGame = { ...best, at: now }; return best; }
+  // Sin datos nuevos unos segundos: se muestra el último valor en vez de borrar los FPS.
+  if (lastGame && now - lastGame.at < 4000) return { ...lastGame, batch: null };
+  lastGame = null;
+  return null;
 }
 
 
@@ -1369,8 +1425,9 @@ ipcMain.handle('game:setGpu', (_, pref) => new Promise((resolve) => {
   });
 }));
 
-const helperActive = () => {
-  try { return Date.now() - fs.statSync(path.join(sensorDir(), 'heartbeat.txt')).mtimeMs < 7000; } catch { return false; }
+// Con el juego a tope el ayudante puede tardar en latir: se tolera hasta 20 s antes de darlo por apagado.
+const helperActive = (maxMs = 20000) => {
+  try { return Date.now() - fs.statSync(path.join(sensorDir(), 'heartbeat.txt')).mtimeMs < maxMs; } catch { return false; }
 };
 
 function wmiFans() {
@@ -1397,7 +1454,7 @@ ipcMain.handle('sys:state', async () => {
   const total = os.totalmem(), free = os.freemem();
 
   let game = null;
-  if (helper) { ingestFps(); game = currentGame(); } else if (fpsState.apps.size) resetFps();
+  if (helper) { ingestFps(); game = currentGame(); } else if (fpsState.apps.size && !helperActive(60000)) resetFps();
   const cpuTemp = lhm ? lhm.cpuTemp : null;
   trackFps(game);
   if (game) pollGameGpu(game.pid);
@@ -1499,7 +1556,7 @@ async function buildDiag() {
   L.push(`CPU, lo que muestra la app ahora: ${cpuLast.usage.toFixed(1)} %`);
   const nvl = nvStream.latest || [];
   L.push(`GPU NVIDIA (nvidia-smi, flujo ${nvStream.proc ? 'activo' : 'detenido'}): ${nvl.length ? nvl.map((g) => `${g.usage} % uso, ${g.temp} °C, VRAM ${g.vramUsed}/${g.vramTotal} MB`).join(' | ') + ' (hace ' + ago(nvStream.at) + ')' : 'SIN DATO'}`);
-  L.push(`GPU, como el Administrador de tareas (contadores de Windows, ayudante ${gpuTm.proc ? 'corriendo' : 'detenido'}): ${gpuTm.at ? [...gpuTm.usage].map(([k, v]) => `tarjeta ${gameGpu.luidNames && gameGpu.luidNames.get(k) || k}: uso ${v.toFixed(1)} %, VRAM dedicada ${((gpuTm.mem.get(k) || 0) / 1073741824).toFixed(2)} GB`).join(' | ') + ' (hace ' + ago(gpuTm.at) + ')' : 'SIN DATO'}`);
+  L.push(`GPU, como el Administrador de tareas (contadores de Windows, ayudante ${gpuTm.proc ? 'corriendo' : 'detenido'}): ${gpuTm.at ? [...gpuTm.usage].map(([k, v]) => `tarjeta ${gameGpu.luidNames && gameGpu.luidNames.get(k) || k}: uso ${v.toFixed(1)} %, VRAM dedicada ${((gpuTm.mem.get(k) || 0) / 1073741824).toFixed(2)} GB, temperatura ${gpuTm.temp.has(k) ? gpuTm.temp.get(k).toFixed(1) + ' °C' : 'SIN DATO'}`).join(' | ') + ' (hace ' + ago(gpuTm.at) + ')' : 'SIN DATO'}`);
   L.push(`RAM: usada ${((os.totalmem() - os.freemem()) / 1073741824).toFixed(1)} GB de ${(os.totalmem() / 1073741824).toFixed(1)} GB (disponible ${(os.freemem() / 1073741824).toFixed(1)} GB)`);
   try {
     const eng = await new Promise((resolve) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', psEncoded(`$s=@{}
