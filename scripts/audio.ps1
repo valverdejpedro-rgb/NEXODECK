@@ -188,10 +188,10 @@ public static class Aud {
     return name;
   }
 
-  // Recorre las sesiones de audio de salida (apps) de todos los dispositivos activos.
-  static void ForSessions(Func<string, ISimpleAudioVolume, bool> cb) {
+  // Recorre las sesiones de audio (apps) de todos los dispositivos activos. flow: 0 = salida, 1 = entrada (micrófono).
+  static void ForSessions(int flow, Func<string, ISimpleAudioVolume, bool> cb) {
     IMMDeviceCollection col;
-    if (Enum().EnumAudioEndpoints(0, 1, out col) != 0 || col == null) return;
+    if (Enum().EnumAudioEndpoints(flow, 1, out col) != 0 || col == null) return;
     int n; col.GetCount(out n);
     for (int i = 0; i < n; i++) {
       try {
@@ -214,11 +214,11 @@ public static class Aud {
     }
   }
 
-  static int EachSession(string exe, Func<ISimpleAudioVolume, int> act) {
+  static int EachSession(int flow, string exe, Func<ISimpleAudioVolume, int> act) {
     string want = (exe ?? "").Trim();
     if (want.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) want = want.Substring(0, want.Length - 4);
     int hit = 0;
-    ForSessions((name, sv) => {
+    ForSessions(flow, (name, sv) => {
       if (string.Equals(name, want, StringComparison.OrdinalIgnoreCase) && act(sv) == 0) hit++;
       return true;
     });
@@ -246,10 +246,10 @@ public static class Aud {
   }
 
   // Volumen y silencio actuales de cada app: "nombre=pct,mute;..." (volumen más alto; silenciada solo si todas lo están)
-  public static string AL() {
+  public static string AL(int flow) {
     Dictionary<string, float> vol = new Dictionary<string, float>();
     Dictionary<string, bool> mut = new Dictionary<string, bool>();
-    ForSessions((name, sv) => {
+    ForSessions(flow, (name, sv) => {
       float v; bool m;
       if (sv.GetMasterVolume(out v) != 0) return true;
       sv.GetMute(out m);
@@ -264,12 +264,12 @@ public static class Aud {
     return "OK\t" + string.Join(";", parts.ToArray());
   }
 
-  public static string AV(string exe, int pct) {
+  public static string AV(string exe, int pct, int flow) {
     float f = Math.Max(0, Math.Min(100, pct)) / 100f;
-    return EachSession(exe, s => s.SetMasterVolume(f, ref Ctx)) > 0 ? "OK" : "ERR";
+    return EachSession(flow, exe, s => s.SetMasterVolume(f, ref Ctx)) > 0 ? "OK" : "ERR";
   }
-  public static string AM(string exe, bool mute) {
-    return EachSession(exe, s => s.SetMute(mute, ref Ctx)) > 0 ? "OK" : "ERR";
+  public static string AM(string exe, bool mute, int flow) {
+    return EachSession(flow, exe, s => s.SetMute(mute, ref Ctx)) > 0 ? "OK" : "ERR";
   }
 
   // Pone el dispositivo como predeterminado en los tres roles (consola, multimedia y comunicaciones).
@@ -363,10 +363,13 @@ while ($true) {
     switch ($p[1]) {
       'EV' { $r = [Aud]::EV($arg, $n) }
       'EM' { $r = [Aud]::EM($arg, ($n -ne 0)) }
-      'AV' { $r = [Aud]::AV($arg, $n) }
-      'AM' { $r = [Aud]::AM($arg, ($n -ne 0)) }
+      'AV' { $r = [Aud]::AV($arg, $n, 0) }
+      'AM' { $r = [Aud]::AM($arg, ($n -ne 0), 0) }
+      'AVI' { $r = [Aud]::AV($arg, $n, 1) }
+      'AMI' { $r = [Aud]::AM($arg, ($n -ne 0), 1) }
       'EGM' { $r = [Aud]::EGM($arg) }
-      'AL' { $r = [Aud]::AL() }
+      'AL' { $r = [Aud]::AL(0) }
+      'ALI' { $r = [Aud]::AL(1) }
       'SD' { $r = [Aud]::SD($arg) }
       'DEFS' { $r = [Aud]::DEFS() }
       'ASD' { $r = [Aud]::ASD() }
