@@ -354,8 +354,8 @@ function readMicUse() {
 }
 
 // Volumen y silencio en vivo de las apps (directo de Windows).
-async function liveApps() {
-  const r = await fastCall('AL', '-', 0);
+async function liveApps(cmd = 'AL') {      // 'AL' = salida (altavoces), 'ALI' = entrada (micrófono)
+  const r = await fastCall(cmd, '-', 0);
   const m = new Map();
   if (r && r.ok) for (const x of r.payload.split(';')) {
     const q = x.match(/^(.+)=(\d+),([01])$/);
@@ -392,7 +392,9 @@ function liveDeviceIds(live, key, devs) {
 async function listApps() {
   const rows = await getRows();
   const live = await liveApps().catch(() => new Map());
+  const liveIn = await liveApps('ALI').catch(() => new Map());
   const routes = await liveRoutes().catch(() => null);
+  const micReg = await readMicUse().catch(() => new Map());   // lo que Windows dice que usa el micrófono AHORA
   const all = await listDevices(rows);
   await overlayDevices(all);
   const outs = all.output, ins = all.input;
@@ -451,13 +453,22 @@ async function listApps() {
   const apps = list.map((a) => {
     const canRoute = /\.exe$/i.test(a.target);
     const main = a.render || a.capture;
-    const lv = a.render && /\.exe$/i.test(a.target) ? live.get(a.target.replace(/\.exe$/i, '').toLowerCase()) : null;
+    const base = a.key.replace(/\.exe$/i, '');
+    const lv = a.render && canRoute ? live.get(base) : null;
+    const lvIn = a.capture && canRoute ? liveIn.get(base) : null;
+    // "En uso de verdad": sonando (sesión de salida activa) o usando el micrófono (sesión de entrada activa Y Windows
+    // lo confirma; Discord/Zoom dejan la sesión abierta al salir de la llamada, y ahí no cuenta).
+    const sessActive = (side, fallback) => (routes ? (routes.get(base + '|' + side) || []).some((x) => x.active) : fallback);
+    const active = a.render ? sessActive('out', a.render.active) : false;
+    const micSess = a.capture ? sessActive('in', a.capture.active) : false;
+    const micActive = micSess && (micReg.has(a.key) ? micReg.get(a.key) : true);
     return {
       key: a.key, target: a.target, name: a.name, icon: a.icon, canRoute,
       hasOut: !!a.render, hasIn: !!a.capture,
       volume: lv ? lv.volume : main.volume, muted: lv ? lv.muted : main.muted,
-      active: a.render ? a.render.active : false,
-      micActive: a.capture ? a.capture.active : false,
+      inVolume: a.capture ? (lvIn ? lvIn.volume : a.capture.volume) : 0,
+      inMuted: a.capture ? (lvIn ? lvIn.muted : a.capture.muted) : false,
+      active, micActive, inUse: active || micActive,
       out: a.render ? routeInfo(a.key + '|out', a.render, outs, defOut, routes) : null,
       in: a.capture ? routeInfo(a.key + '|in', a.capture, ins, defIn, routes) : null,
     };
@@ -624,6 +635,17 @@ async function defWatchTick() {
 function startDefWatch() {
   if (!defWatch.timer) defWatch.timer = setInterval(defWatchTick, 700);
 }
+// Volumen y silencio del MICRÓFONO de una app (sesión de entrada). Solo con el ayudante rápido: svcl no distingue
+// entre la sesión de salida y la de entrada de un mismo programa.
+ipcMain.handle('apps:setInVolume', async (_, t, pct) => {
+  if (!validTarget(t) || !/\.exe$/i.test(t)) return;
+  const v = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+  if (!(await fastAudio('AVI', t, v))) throw new Error('No se pudo cambiar el volumen del micrófono');
+});
+ipcMain.handle('apps:setInMute', async (_, t, muted) => {
+  if (!validTarget(t) || !/\.exe$/i.test(t)) return;
+  if (!(await fastAudio('AMI', t, muted ? 1 : 0))) throw new Error('No se pudo cambiar el silencio del micrófono');
+});
 ipcMain.handle('apps:setMute', async (_, t, muted) => {
   if (!validTarget(t)) return;
   invalidateRows();

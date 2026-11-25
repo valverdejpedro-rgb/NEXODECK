@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('api', {
   getApps: () => ipcRenderer.invoke('apps:list'),
   setAppVolume: (target, pct) => ipcRenderer.invoke('apps:setVolume', target, pct),
   setAppMute: (target, muted) => ipcRenderer.invoke('apps:setMute', target, muted),
+  setAppInVolume: (target, pct) => ipcRenderer.invoke('apps:setInVolume', target, pct),
+  setAppInMute: (target, muted) => ipcRenderer.invoke('apps:setInMute', target, muted),
   setAppDevice: (target, deviceId, kind) => ipcRenderer.invoke('apps:setDevice', target, deviceId, kind),
   getPower: () => ipcRenderer.invoke('power:list'),
   setPower: (id) => ipcRenderer.invoke('power:set', id),

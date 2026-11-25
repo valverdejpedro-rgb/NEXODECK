@@ -10,13 +10,20 @@
 <body>
   <main id="app">
     <nav class="tabs" role="tablist" aria-label="Secciones">
-      <button class="tab active" type="button" role="tab" data-tab="devices" aria-selected="true">Dispositivos</button>
+      <button class="tab active" type="button" role="tab" data-tab="home" aria-selected="true">Inicio</button>
       <button class="tab" type="button" role="tab" data-tab="apps" aria-selected="false" tabindex="-1">Aplicaciones</button>
       <button class="tab" type="button" role="tab" data-tab="power" aria-selected="false" tabindex="-1">Energía</button>
       <button class="tab" type="button" role="tab" data-tab="system" aria-selected="false" tabindex="-1">Estado del sistema</button>
     </nav>
 
-    <div id="tab-devices" class="tab-panel" role="tabpanel">
+    <div id="tab-home" class="tab-panel" role="tabpanel">
+      <section id="home-alert" class="panel sys-alert" role="alert" hidden>
+        <strong>Tu equipo está muy exigido</strong>
+        <ul id="home-alert-list"></ul>
+      </section>
+
+      <h2 class="sect"><span>Audio del equipo</span></h2>
+      <div id="home-devs" class="home-grid">
       <section class="panel" data-kind="output">
         <div class="head">
           <label for="dev-output">Salida</label>
@@ -52,8 +59,16 @@
           <output class="pct">0</output>
         </div>
       </section>
-
+      </div>
       <p id="error" class="error" hidden></p>
+
+      <h2 class="sect"><span>En uso ahora</span><span id="home-count" class="sect-count"></span></h2>
+      <div id="home-apps" class="home-grid"></div>
+      <p id="home-empty" class="empty" hidden>Nada en uso ahora mismo. Cuando abras una llamada, una reunión o reproduzcas audio, aparecerá aquí.</p>
+      <p id="home-error" class="error" hidden></p>
+
+      <h2 class="sect"><span>Batería y sistema</span></h2>
+      <div id="home-sys" class="sys-grid"></div>
     </div>
 
     <div id="tab-apps" class="tab-panel" role="tabpanel" hidden>

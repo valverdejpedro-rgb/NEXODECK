@@ -160,8 +160,16 @@ footer button:focus-visible { outline: 2px solid var(--accent); outline-offset: 
 .tab.active { background: var(--accent-soft); color: var(--accent); }
 .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .tab-panel { display: grid; gap: 12px; align-content: start; }
-#tab-devices { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
-#tab-devices .error { grid-column: 1 / -1; }
+
+/* ---------- Inicio ---------- */
+.home-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; align-content: start; }
+.sect {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  margin-top: 6px; padding: 0 4px 6px; border-bottom: 1px solid var(--line);
+  color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+}
+.sect-count { font-weight: 500; letter-spacing: 0; text-transform: none; }
+.sect:first-of-type { margin-top: 0; }
 .tab-panel[hidden] { display: none; }
 
 /* ---------- Audio por aplicación ---------- */
@@ -183,7 +191,16 @@ footer button:focus-visible { outline: 2px solid var(--accent); outline-offset: 
 [hidden] { display: none !important; }
 
 /* Estado de las apps */
-.app-row.muted .app-state::before { background: var(--danger); }
+.app-row.out-muted .app-state::before { background: var(--danger); }
+
+/* Silencio de cada control dentro de una app (salida y micrófono por separado) */
+.control.cmuted .mute { background: transparent; color: var(--danger); box-shadow: inset 0 0 0 1.5px var(--danger); }
+.control.cmuted .mute .slash { display: block; }
+.control.cmuted .mute .waves { display: none; }
+.control.cmuted .pct { color: var(--muted); }
+.control.cmuted .slider::-webkit-slider-runnable-track { background: linear-gradient(to right, var(--muted) var(--v), var(--track) var(--v)); }
+.control.cmuted .slider::-webkit-slider-thumb { border-color: var(--muted); }
+.app-row .app-in-control { margin-top: 2px; }
 
 /* ---------- Perfiles de energía ---------- */
 #power-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; align-content: start; }

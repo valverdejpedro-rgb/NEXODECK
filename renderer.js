@@ -98,7 +98,7 @@ const hsEl = document.createElement('section');
 hsEl.className = 'panel hs';
 hsEl.hidden = true;
 hsEl.innerHTML = '<div class="head"><label>Audífonos Corsair</label><b class="hs-preset">–</b></div><p class="hs-note"></p>';
-document.getElementById('tab-devices').insertBefore(hsEl, errorEl);
+document.getElementById('home-devs').appendChild(hsEl);
 const hsPreset = hsEl.querySelector('.hs-preset');
 const hsNote = hsEl.querySelector('.hs-note');
 
@@ -120,7 +120,7 @@ async function refreshHeadset() {
 }
 
 // El preset del audífono se lee aparte y más seguido (cada 0,5 s) para que el cambio se vea casi al instante.
-setInterval(() => { if (!document.hidden && activeTab === 'devices') refreshHeadset(); }, 500);
+setInterval(() => { if (!document.hidden && activeTab === 'home') refreshHeadset(); }, 500);
 
 let refreshing = false;
 async function refresh() {
@@ -222,17 +222,19 @@ window.api.info().then((i) => {
 
 const tabBtns = [...document.querySelectorAll('.tab')];
 const tabPanels = {
-  devices: document.getElementById('tab-devices'),
+  home: document.getElementById('tab-home'),
   apps: document.getElementById('tab-apps'),
   power: document.getElementById('tab-power'),
   system: document.getElementById('tab-system'),
 };
-let activeTab = 'devices';
+let activeTab = 'home';
 
 function refreshActive() {
   if (activeTab === 'apps') return refreshApps();
   if (activeTab === 'power') return refreshPower();
   if (activeTab === 'system') return refreshSystem();
+  refreshHomeApps();
+  refreshHomeSystem();
   return refresh();
 }
 
@@ -259,14 +261,26 @@ tabBtns.forEach((b, i) => {
 });
 
 /* ---------- Audio por aplicación ---------- */
+/* Cada fila de aplicación sirve para dos listas: la pestaña «Aplicaciones» (todas) y la de «Inicio» (solo las que se usan ahora). */
 
 const appsListEl = document.getElementById('apps-list');
 const appsEmptyEl = document.getElementById('apps-empty');
 const appsErrorEl = document.getElementById('apps-error');
 const appsCountEl = document.getElementById('apps-count');
-const appRows = new Map();
 let appsBusy = 0;
-let appsOrder = '';
+
+const makeAppList = (container) => ({ container, rows: new Map(), order: '' });
+const appsList = makeAppList(appsListEl);
+const homeList = makeAppList(document.getElementById('home-apps'));
+
+const SPK_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path class="waves" d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/><path class="slash" d="M3.5 3.5l17 17"/></svg>';
+const MIC_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path class="waves" d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/><path class="slash" d="M3.5 3.5l17 17"/></svg>';
+const ctlHtml = (cls, svg) => `
+  <div class="control ${cls}">
+    <button class="mute" type="button" aria-pressed="false">${svg}</button>
+    <input class="slider" type="range" min="0" max="100" step="1" value="0">
+    <output class="pct">0</output>
+  </div>`;
 
 const APP_TEMPLATE = `
   <div class="app-top">
@@ -279,26 +293,23 @@ const APP_TEMPLATE = `
     <select class="device dev-out"></select>
   </div>
   <p class="app-hint hint-out" hidden>Cambio pendiente: la app lo aplicará cuando reinicie su audio (pausa y reproduce, o ábrela de nuevo).</p>
+  ${ctlHtml('app-out-control', SPK_SVG)}
   <div class="head app-route app-in">
     <span class="lbl">Entrada</span>
     <select class="device dev-in"></select>
   </div>
   <p class="app-hint hint-in" hidden>Cambio pendiente: la app lo aplicará cuando vuelva a abrir el micrófono (cuelga y vuelve a llamar, o ábrela de nuevo).</p>
-  <div class="control">
-    <button class="mute" type="button" aria-pressed="false">
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M4 9v6h4l5 4V5L8 9H4z"/>
-        <path class="waves" d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>
-        <path class="slash" d="M3.5 3.5l17 17"/>
-      </svg>
-    </button>
-    <input class="slider" type="range" min="0" max="100" step="1" value="0">
-    <output class="pct">0</output>
-  </div>`;
+  ${ctlHtml('app-in-control', MIC_SVG)}`;
 
-function paintApp(row, value) {
-  row.slider.style.setProperty('--v', value + '%');
-  row.pct.textContent = Math.round(value);
+function paintCtl(c, value) {
+  c.slider.style.setProperty('--v', value + '%');
+  c.pct.textContent = Math.round(value);
+}
+
+function setCtlMuted(c, muted) {
+  c.muted = muted;
+  c.el.classList.toggle('cmuted', muted);
+  c.mute.setAttribute('aria-pressed', String(muted));
 }
 
 async function actApps(fn) {
@@ -306,18 +317,58 @@ async function actApps(fn) {
   let failed = false;
   try { await fn(); } catch { failed = true; } finally { appsBusy--; }
   if (failed) {
-    appsErrorEl.hidden = false;
-    appsErrorEl.textContent = 'No se pudo aplicar el cambio. Inténtalo de nuevo.';
-    setTimeout(() => { appsErrorEl.hidden = true; }, 4000);
+    const msg = 'No se pudo aplicar el cambio. Inténtalo de nuevo.';
+    for (const el of [appsErrorEl, homeErrorEl]) {
+      el.hidden = false;
+      el.textContent = msg;
+      setTimeout(() => { el.hidden = true; }, 4000);
+    }
   }
-  setTimeout(refreshApps, 250);
+  setTimeout(refreshAppsView, 250);
 }
 
-function appStateText(a) {
-  if (a.muted) return 'Silenciada';
-  if (a.active) return 'Sonando';
-  if (a.micActive) return 'Usando el micrófono';
-  return 'En silencio';
+// Texto de estado de la fila: la salida y el micrófono se describen por separado.
+function appStateText(st) {
+  const parts = [];
+  if (st.hasOut) parts.push(st.muted ? 'Silenciada' : st.active ? 'Sonando' : 'En silencio');
+  if (st.hasIn && st.micActive) parts.push(st.inMuted ? 'Micrófono silenciado' : 'Usando el micrófono');
+  return parts.join(' · ') || 'En silencio';
+}
+
+// Un control de volumen + silencio (el de la salida o el del micrófono de la app).
+function makeCtl(el, volFn, muteFn, row, onMute) {
+  const c = {
+    el, mute: el.querySelector('.mute'), slider: el.querySelector('.slider'), pct: el.querySelector('.pct'),
+    muted: false, dragging: false, timer: null, send: null,
+  };
+  c.send = makeSender((v) => volFn(row.target, v).catch(() => {}));
+  c.slider.addEventListener('pointerdown', () => { c.dragging = true; });
+  c.slider.addEventListener('input', () => {
+    const v = Number(c.slider.value);
+    paintCtl(c, v);
+    c.send(v);
+  });
+  c.slider.addEventListener('change', () => {
+    c.dragging = false;
+    actApps(() => volFn(row.target, Number(c.slider.value)));
+  });
+  // La rueda solo actúa sobre el control de volumen, para poder desplazar la lista con normalidad.
+  c.el.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const v = Math.max(0, Math.min(100, Number(c.slider.value) + (e.deltaY < 0 ? 5 : -5)));
+    c.slider.value = v;
+    paintCtl(c, v);
+    c.send(v);
+    clearTimeout(c.timer);
+    c.timer = setTimeout(() => actApps(() => volFn(row.target, v)), 300);
+  }, { passive: false });
+  c.mute.addEventListener('click', () => {
+    const next = !c.muted;
+    setCtlMuted(c, next);                   // se ve al instante, sin esperar a Windows
+    onMute(next);
+    actApps(() => muteFn(row.target, next));
+  });
+  return c;
 }
 
 function makeAppRow() {
@@ -335,49 +386,28 @@ function makeAppRow() {
     inRoute: el.querySelector('.app-in'),
     inSelect: el.querySelector('.dev-in'),
     inHint: el.querySelector('.hint-in'),
-    control: el.querySelector('.control'),
-    mute: el.querySelector('.mute'),
-    slider: el.querySelector('.slider'),
-    pct: el.querySelector('.pct'),
-    target: '', muted: false, active: false, micActive: false, dragging: false, timer: null, sigOut: '', sigIn: '',
-    send: null,
+    st: { muted: false, active: false, micActive: false, inMuted: false, hasOut: false, hasIn: false },
+    target: '', sigOut: '', sigIn: '',
+    out: null, in: null,
+    get dragging() { return this.out.dragging || this.in.dragging; },
   };
-  row.send = makeSender((v) => window.api.setAppVolume(row.target, v).catch(() => {}));
+  const refreshState = () => {
+    row.state.textContent = appStateText(row.st);
+    row.el.classList.toggle('out-muted', row.st.hasOut && row.st.muted);
+  };
+  row.out = makeCtl(el.querySelector('.app-out-control'),
+    (t, v) => window.api.setAppVolume(t, v), (t, m) => window.api.setAppMute(t, m), row,
+    (m) => { row.st.muted = m; refreshState(); });
+  row.in = makeCtl(el.querySelector('.app-in-control'),
+    (t, v) => window.api.setAppInVolume(t, v), (t, m) => window.api.setAppInMute(t, m), row,
+    (m) => { row.st.inMuted = m; refreshState(); });
 
-  row.slider.addEventListener('pointerdown', () => { row.dragging = true; });
-  row.slider.addEventListener('input', () => {
-    const v = Number(row.slider.value);
-    paintApp(row, v);
-    row.send(v);
-  });
-  row.slider.addEventListener('change', () => {
-    row.dragging = false;
-    actApps(() => window.api.setAppVolume(row.target, Number(row.slider.value)));
-  });
-  // La rueda solo actúa sobre el control de volumen, para poder desplazar la lista con normalidad.
-  row.control.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    const v = Math.max(0, Math.min(100, Number(row.slider.value) + (e.deltaY < 0 ? 5 : -5)));
-    row.slider.value = v;
-    paintApp(row, v);
-    row.send(v);
-    clearTimeout(row.timer);
-    row.timer = setTimeout(() => actApps(() => window.api.setAppVolume(row.target, v)), 300);
-  }, { passive: false });
-  row.mute.addEventListener('click', () => {
-    const next = !row.muted;
-    row.muted = next;                       // se ve al instante, sin esperar a Windows
-    row.el.classList.toggle('muted', next);
-    row.mute.setAttribute('aria-pressed', String(next));
-    row.state.textContent = appStateText(row);
-    actApps(() => window.api.setAppMute(row.target, next));
-  });
   // Al elegir se quita el foco del selector: así la lista vuelve a seguir lo que informa Windows.
   row.outSelect.addEventListener('change', () => { const v = row.outSelect.value; row.outSelect.blur(); actApps(() => window.api.setAppDevice(row.target, v, 'output')); });
   row.inSelect.addEventListener('change', () => { const v = row.inSelect.value; row.inSelect.blur(); actApps(() => window.api.setAppDevice(row.target, v, 'input')); });
   // Al soltar el foco sin elegir nada, la lista se vuelve a sincronizar con Windows enseguida.
-  row.outSelect.addEventListener('blur', () => setTimeout(refreshApps, 100));
-  row.inSelect.addEventListener('blur', () => setTimeout(refreshApps, 100));
+  row.outSelect.addEventListener('blur', () => setTimeout(refreshAppsView, 100));
+  row.inSelect.addEventListener('blur', () => setTimeout(refreshAppsView, 100));
   return row;
 }
 
@@ -411,17 +441,16 @@ function updateRoute(route, select, hint, info, show, devices, sigKey, row, defI
 
 function updateAppRow(row, a, devices, inputs, defOut, defIn) {
   row.target = a.target;
-  row.muted = a.muted;
-  row.active = a.active;
-  row.micActive = a.micActive;
+  row.st = { muted: a.muted, active: a.active, micActive: a.micActive, inMuted: a.inMuted, hasOut: a.hasOut, hasIn: a.hasIn };
   row.name.textContent = a.name;
   row.name.title = a.target;
-  row.state.textContent = appStateText(a);
-  row.el.classList.toggle('playing', (a.active || a.micActive) && !a.muted);
-  row.el.classList.toggle('muted', a.muted);
-  row.mute.setAttribute('aria-pressed', String(a.muted));
-  row.mute.setAttribute('aria-label', `Silenciar ${a.name}`);
-  row.slider.setAttribute('aria-label', `Volumen de ${a.name}`);
+  row.state.textContent = appStateText(row.st);
+  row.el.classList.toggle('playing', (a.active && !a.muted) || (a.micActive && !a.inMuted));
+  row.el.classList.toggle('out-muted', a.hasOut && a.muted);
+  row.out.mute.setAttribute('aria-label', `Silenciar ${a.name}`);
+  row.out.slider.setAttribute('aria-label', `Volumen de ${a.name}`);
+  row.in.mute.setAttribute('aria-label', `Silenciar el micrófono de ${a.name}`);
+  row.in.slider.setAttribute('aria-label', `Volumen del micrófono de ${a.name}`);
   row.outSelect.setAttribute('aria-label', `Dispositivo de salida de ${a.name}`);
   row.inSelect.setAttribute('aria-label', `Dispositivo de entrada de ${a.name}`);
 
@@ -433,35 +462,41 @@ function updateAppRow(row, a, devices, inputs, defOut, defIn) {
   updateRoute(row.outRoute, row.outSelect, row.outHint, a.out, a.canRoute && a.hasOut, devices, 'sigOut', row, defOut);
   updateRoute(row.inRoute, row.inSelect, row.inHint, a.in, a.canRoute && a.hasIn, inputs, 'sigIn', row, defIn);
 
-  row.control.hidden = !a.hasOut; // una app que solo usa el micrófono no tiene volumen de salida
-  if (!row.dragging) {
-    row.slider.value = a.volume;
-    paintApp(row, a.volume);
+  // Volumen y silencio de la salida (una app que solo usa el micrófono no tiene) y del micrófono (solo si lo usa).
+  row.out.el.hidden = !a.hasOut;
+  row.in.el.hidden = !(a.hasIn && a.canRoute);
+  setCtlMuted(row.out, a.muted);
+  setCtlMuted(row.in, a.inMuted);
+  if (!row.out.dragging) { row.out.slider.value = a.volume; paintCtl(row.out, a.volume); }
+  if (!row.in.dragging) { row.in.slider.value = a.inVolume; paintCtl(row.in, a.inVolume); }
+}
+
+function renderAppList(list, apps, devices, inputs, defOut, defIn) {
+  const seen = new Set();
+  for (const a of apps) {
+    seen.add(a.key);
+    let row = list.rows.get(a.key);
+    if (!row) {
+      row = makeAppRow();
+      list.rows.set(a.key, row);
+      list.container.appendChild(row.el);
+      list.order = '';
+    }
+    updateAppRow(row, a, devices, inputs || [], defOut || '', defIn || '');
+  }
+  for (const [key, row] of list.rows) {
+    if (!seen.has(key)) { row.el.remove(); list.rows.delete(key); list.order = ''; }
+  }
+  // Orden alfabético; solo se recoloca si cambió, para no romper un arrastre en curso.
+  const order = apps.map((a) => a.key).join('|');
+  if (order !== list.order && ![...list.rows.values()].some((r) => r.dragging)) {
+    for (const a of apps) list.container.appendChild(list.rows.get(a.key).el);
+    list.order = order;
   }
 }
 
 function renderApps({ apps, devices, inputs, defaultOut, defaultIn }) {
-  const seen = new Set();
-  for (const a of apps) {
-    seen.add(a.key);
-    let row = appRows.get(a.key);
-    if (!row) {
-      row = makeAppRow();
-      appRows.set(a.key, row);
-      appsListEl.appendChild(row.el);
-      appsOrder = '';
-    }
-    updateAppRow(row, a, devices, inputs || [], defaultOut || '', defaultIn || '');
-  }
-  for (const [key, row] of appRows) {
-    if (!seen.has(key)) { row.el.remove(); appRows.delete(key); appsOrder = ''; }
-  }
-  // Orden alfabético; solo se recoloca si cambió, para no romper un arrastre en curso.
-  const order = apps.map((a) => a.key).join('|');
-  if (order !== appsOrder && ![...appRows.values()].some((r) => r.dragging)) {
-    for (const a of apps) appsListEl.appendChild(appRows.get(a.key).el);
-    appsOrder = order;
-  }
+  renderAppList(appsList, apps, devices, inputs, defaultOut, defaultIn);
   appsEmptyEl.hidden = apps.length > 0;
   appsCountEl.textContent = apps.length === 1 ? '1 aplicación' : `${apps.length} aplicaciones`;
 }
@@ -478,6 +513,40 @@ async function refreshApps() {
     appsErrorEl.hidden = false;
     appsErrorEl.textContent = 'No se pudo leer el audio de las aplicaciones. Revisa que svcl.exe esté incluido en la app.';
   } finally { appsRefreshing = false; }
+}
+
+/* ---------- Inicio: aplicaciones en uso ahora ---------- */
+
+const homeEmptyEl = document.getElementById('home-empty');
+const homeErrorEl = document.getElementById('home-error');
+const homeCountEl = document.getElementById('home-count');
+const homeHold = new Map();      // app -> última vez que estuvo en uso (para que no parpadee al pausar un instante)
+const HOME_HOLD_MS = 6000;
+let homeRefreshing = false;
+
+async function refreshHomeApps() {
+  if (appsBusy || homeRefreshing) return;
+  homeRefreshing = true;
+  try {
+    const st = await window.api.getApps();
+    if (!appsBusy) {
+      const now = Date.now();
+      for (const a of st.apps) if (a.inUse) homeHold.set(a.key, now);
+      for (const [k, t] of homeHold) if (now - t > HOME_HOLD_MS) homeHold.delete(k);
+      const list = st.apps.filter((a) => homeHold.has(a.key));
+      renderAppList(homeList, list, st.devices, st.inputs, st.defaultOut, st.defaultIn);
+      homeEmptyEl.hidden = list.length > 0;
+      homeCountEl.textContent = list.length === 1 ? '1 aplicación' : `${list.length} aplicaciones`;
+    }
+    homeErrorEl.hidden = true;
+  } catch {
+    homeErrorEl.hidden = false;
+    homeErrorEl.textContent = 'No se pudo leer el audio de las aplicaciones. Revisa que svcl.exe esté incluido en la app.';
+  } finally { homeRefreshing = false; }
+}
+
+function refreshAppsView() {
+  return activeTab === 'home' ? refreshHomeApps() : refreshApps();
 }
 
 /* ---------- Perfiles de energía ---------- */
@@ -553,6 +622,8 @@ const sysEnableBtn = document.getElementById('sys-enable');
 const sysGameEl = document.getElementById('sys-game');
 const sysAlertEl = document.getElementById('sys-alert');
 const sysAlertList = document.getElementById('sys-alert-list');
+const homeAlertEl = document.getElementById('home-alert');
+const homeAlertList = document.getElementById('home-alert-list');
 const sysCards = {};
 let sysBusy = false;
 let sysEnabling = false;
@@ -568,7 +639,7 @@ const LIMITS = {
   vram: [75, 92],      // % de VRAM usada
 };
 
-function mkStat(id, title) {
+function buildStat(title) {
   const el = document.createElement('section');
   el.className = 'panel stat';
   el.innerHTML = `
@@ -577,7 +648,7 @@ function mkStat(id, title) {
     <div class="bar"><i></i></div>
     <p class="stat-note"></p>`;
   el.querySelector('.stat-title').textContent = title;
-  sysCards[id] = {
+  return {
     el,
     title: el.querySelector('.stat-title'),
     sub: el.querySelector('.stat-sub'),
@@ -589,6 +660,9 @@ function mkStat(id, title) {
     bar: el.querySelector('.bar i'),
     note: el.querySelector('.stat-note'),
   };
+}
+function mkStat(id, title) {
+  sysCards[id] = buildStat(title);
   if (id === 'fans') {
     const c = sysCards.fans;
     c.list = document.createElement('ul');
@@ -623,8 +697,8 @@ const limitsFor = (maxT, fixed) => (maxT && maxT > 60 ? [maxT - 10, maxT - 3] : 
 const fmtT = (t) => (t == null ? '' : `${Math.round(t)} °C`);
 const gb = (mb) => (mb / 1024).toFixed(1);
 
-function setStat(id, o) {
-  const c = sysCards[id];
+function setStat(id, o) { setStatOn(sysCards[id], o); }
+function setStatOn(c, o) {
   c.sub.textContent = o.sub || '';
   c.big.textContent = o.big == null ? '–' : o.big;
   c.unit.textContent = o.unit || '';
@@ -763,8 +837,10 @@ function updateAlerts(found) {
     if (a.streak <= -4) alertState.delete(key);
   }
   const active = [...alertState.values()].filter((a) => a.on);
-  sysAlertEl.hidden = !active.length;
-  sysAlertList.replaceChildren(...active.map((a) => { const li = document.createElement('li'); li.textContent = a.msg; return li; }));
+  for (const [box, list] of [[sysAlertEl, sysAlertList], [homeAlertEl, homeAlertList]]) {
+    box.hidden = !active.length;
+    list.replaceChildren(...active.map((a) => { const li = document.createElement('li'); li.textContent = a.msg; return li; }));
+  }
 }
 
 function renderSystem(s) {
@@ -877,9 +953,124 @@ sysEnableBtn.addEventListener('click', async () => {
   setTimeout(refreshSystem, 1500);
 });
 
+
+/* ---------- Inicio: batería y sistema ---------- */
+
+const homeSysEl = document.getElementById('home-sys');
+const homeCards = {};
+let homeSysOrder = '';
+let batMgr = null;          // administrador de batería de Chromium (navigator.getBattery)
+let batFailed = false;
+
+async function readBattery() {
+  if (batFailed || typeof navigator.getBattery !== 'function') return null;
+  try {
+    if (!batMgr) batMgr = await navigator.getBattery();
+    return batMgr;
+  } catch { batFailed = true; return null; }
+}
+const fmtDur = (sec) => {
+  if (!isFinite(sec) || sec <= 0) return '';
+  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+  return h ? `${h} h ${m} min` : `${m} min`;
+};
+
+// Pone/actualiza una tarjeta de la rejilla de Inicio (se crean al primer uso).
+function homeStat(ids, id, title, o) {
+  if (!homeCards[id]) homeCards[id] = buildStat(title);
+  homeCards[id].title.textContent = title;
+  setStatOn(homeCards[id], o);
+  ids.push(id);
+}
+
+async function renderHomeSystem(s) {
+  const ids = [];
+  const alerts = [];
+
+  const b = await readBattery();
+  if (b) {
+    const pct = Math.round(b.level * 100);
+    const lvl = b.charging ? 'ok' : pct <= 15 ? 'hot' : pct <= 30 ? 'warm' : 'ok';
+    const left = b.charging ? (b.level < 1 ? fmtDur(b.chargingTime) : '') : fmtDur(b.dischargingTime);
+    homeStat(ids, 'bat', 'Batería', {
+      sub: b.charging ? (b.level >= 1 ? 'Conectada' : 'Cargando') : 'Usando batería',
+      big: pct, unit: '%', pct, level: lvl,
+      note: left ? (b.charging ? `Carga completa en ${left}` : `Quedan unos ${left}`) : '',
+    });
+    if (!b.charging && pct <= 15) alerts.push({ key: 'bat', msg: `Batería baja: ${pct}%.` });
+  }
+
+  if (s) {
+    const { cpu, gpus, ram } = s;
+    const multi = gpus.length > 1;
+
+    const cpuLv = level(cpu.temp, limitsFor(cpu.tempLimit, LIMITS.cpuTemp));
+    homeStat(ids, 'cpu', 'CPU', {
+      sub: `${cpu.cores} hilos`, big: Math.round(cpu.usage), unit: '%',
+      temp: fmtT(cpu.temp), tempLevel: cpuLv, alert: cpuLv,
+      pct: cpu.usage, level: level(cpu.usage, LIMITS.usage),
+    });
+    if (cpuLv === 'hot') alerts.push({ key: 'cpu-temp', msg: `CPU a ${Math.round(cpu.temp)} °C: está muy caliente.` });
+
+    gpus.forEach((g, i) => {
+      const label = multi ? `GPU ${i + 1}` : 'GPU';
+      const tLv = level(g.temp, limitsFor(g.tempLimit, LIMITS.gpuTemp));
+      homeStat(ids, `gpu${i}`, label, {
+        sub: (g.name || '').replace(/^NVIDIA\s+/i, '').replace(/GeForce\s+/i, '').replace(/^AMD\s+/i, '').replace(/\s*\(TM\)/gi, ''),
+        big: g.usage == null ? null : Math.round(g.usage), unit: g.usage == null ? '' : '%',
+        temp: fmtT(g.temp), tempLevel: tLv, alert: tLv,
+        pct: g.usage, level: level(g.usage, LIMITS.usage),
+        note: g.usage == null && g.temp == null ? 'Activa los sensores avanzados (pestaña Estado del sistema)' : '',
+      });
+      if (tLv === 'hot') alerts.push({ key: `gpu-temp-${i}`, msg: `${label} a ${Math.round(g.temp)} °C: está muy caliente.` });
+      if (g.vramTotal) {
+        const vp = (g.vramUsed / g.vramTotal) * 100;
+        if (level(vp, LIMITS.vram) === 'hot') alerts.push({ key: `vram-${i}`, msg: `Memoria de video casi llena${multi ? ` (${label})` : ''}: ${Math.round(vp)}%.` });
+      }
+    });
+
+    const ramPct = (ram.used / ram.total) * 100;
+    const ramLv = level(ramPct, LIMITS.ram);
+    homeStat(ids, 'ram', 'RAM', {
+      sub: `${gb(ram.total / 1048576)} GB en total`, big: gb(ram.used / 1048576), unit: 'GB', pct: ramPct, level: ramLv,
+    });
+    if (ramLv === 'hot') alerts.push({ key: 'ram', msg: `RAM casi llena: ${Math.round(ramPct)}% en uso.` });
+
+    if (s.general) {
+      const hotLv = level(s.general.value, LIMITS.hottest);
+      homeStat(ids, 'general', 'Punto más caliente', { sub: s.general.name, big: Math.round(s.general.value), unit: '°C', level: hotLv });
+      if (hotLv === 'hot') alerts.push({ key: 'hottest', msg: `Un sensor llegó a ${Math.round(s.general.value)} °C (${s.general.name}).` });
+    }
+    updateAlerts(alerts);
+  } else if (b) updateAlerts(alerts);
+
+  // Se quitan las tarjetas que ya no aplican y se colocan en orden (solo se toca el DOM si cambió algo).
+  for (const id of Object.keys(homeCards)) {
+    if (!ids.includes(id)) { homeCards[id].el.remove(); delete homeCards[id]; }
+  }
+  const key = ids.join('|');
+  if (key !== homeSysOrder) {
+    homeSysOrder = key;
+    for (const id of ids) homeSysEl.appendChild(homeCards[id].el);
+  }
+}
+
+let homeSysBusy = false;
+async function refreshHomeSystem() {
+  if (homeSysBusy) return;
+  homeSysBusy = true;
+  try {
+    let s = null;
+    try { s = await window.api.getSystem(); } catch {}
+    await renderHomeSystem(s);
+  } finally { homeSysBusy = false; }
+}
+
 setInterval(() => { if (!document.hidden && activeTab === 'system') refreshSystem(); }, 500);
 // Volumen y silencio se leen directo de Windows (milisegundos), así que se pueden consultar muy seguido.
-setInterval(() => { if (!document.hidden && activeTab === 'devices') refresh(); }, 400);
+setInterval(() => { if (!document.hidden && activeTab === 'home') refresh(); }, 400);
+setInterval(() => { if (!document.hidden && activeTab === 'home') refreshHomeApps(); }, 700);
+setInterval(() => { if (!document.hidden && activeTab === 'home') refreshHomeSystem(); }, 1000);
 setInterval(() => { if (!document.hidden && activeTab === 'apps') refreshApps(); }, 700);
 
 refresh();
