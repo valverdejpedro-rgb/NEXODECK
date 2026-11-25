@@ -521,6 +521,18 @@ const homeHold = new Map();      // app -> última vez que estuvo en uso (para q
 const HOME_HOLD_MS = 6000;
 let homeRefreshing = false;
 
+// Muestra solo las filas que caben en el espacio disponible (nada de barras de desplazamiento) y devuelve cuántas quedaron fuera.
+function fitHomeApps() {
+  const c = homeList.container;
+  const rows = [...c.children];
+  for (const r of rows) r.hidden = false;
+  let out = 0;
+  for (const r of rows) {
+    if (r.offsetTop + r.offsetHeight > c.clientHeight + 1) { r.hidden = true; out++; }
+  }
+  return out;
+}
+
 async function refreshHomeApps() {
   if (appsBusy || homeRefreshing) return;
   homeRefreshing = true;
@@ -533,7 +545,8 @@ async function refreshHomeApps() {
       const list = st.apps.filter((a) => homeHold.has(a.key));
       renderAppList(homeList, list, st.devices, st.inputs, st.defaultOut, st.defaultIn);
       homeEmptyEl.hidden = list.length > 0;
-      homeCountEl.textContent = list.length === 1 ? '1 aplicación' : `${list.length} aplicaciones`;
+      const hiddenN = fitHomeApps();
+      homeCountEl.textContent = hiddenN ? `+${hiddenN} más en Aplicaciones` : (list.length === 1 ? '1 aplicación' : `${list.length} aplicaciones`);
     }
     homeErrorEl.hidden = true;
   } catch {
@@ -658,6 +671,7 @@ function mkStat(id, title) {
   sysCards[id] = buildStat(title);
   if (id === 'fans') {
     const c = sysCards.fans;
+    c.el.classList.add('fans');
     c.list = document.createElement('ul');
     c.list.className = 'fan-list';
     c.row.hidden = true;
@@ -712,11 +726,23 @@ const GAME_TEMPLATE = `
     <div class="idle-text"><b>Sin juego detectado</b><p class="idle-msg"></p></div>
   </div>
   <div class="game-body" hidden>
-    <div class="game-top">
-      <div class="game-id">
-        <div class="game-head"><span class="game-title"></span><span class="game-tag">Jugando</span></div>
-        <div class="game-fps"><span class="big fps">–</span><span class="unit">FPS</span></div>
-      </div>
+    <div class="game-head">
+      <span class="game-title"></span><span class="game-tag">Jugando</span>
+      <details class="game-gpu">
+        <summary>Gráfica: <b class="gpu-name">Detectando…</b></summary>
+        <div class="gpu-pop">
+          <p class="gpu-msg"></p>
+          <div class="gpu-pref" role="group" aria-label="Gráfica preferida por Windows para este juego">
+            <button type="button" data-pref="0">Windows decide</button>
+            <button type="button" data-pref="1">Ahorro de energía</button>
+            <button type="button" data-pref="2">Alto rendimiento</button>
+          </div>
+          <p class="gpu-hint"></p>
+        </div>
+      </details>
+    </div>
+    <div class="game-main">
+      <div class="game-fps"><span class="big fps">–</span><span class="unit">FPS</span></div>
       <div class="game-range">
         <div class="range lo"><span class="range-lbl">Más bajo</span><b class="range-val rmin">–</b></div>
         <div class="range hi"><span class="range-lbl">Más alto</span><b class="range-val rmax">–</b></div>
@@ -724,18 +750,15 @@ const GAME_TEMPLATE = `
       </div>
     </div>
     <div class="game-metrics"></div>
-    <details class="game-gpu">
-      <summary>Gráfica que usa el juego: <b class="gpu-name">Detectando…</b></summary>
-      <p class="gpu-msg"></p>
-      <div class="gpu-pref" role="group" aria-label="Gráfica preferida por Windows para este juego">
-        <button type="button" data-pref="0">Windows decide</button>
-        <button type="button" data-pref="1">Ahorro de energía</button>
-        <button type="button" data-pref="2">Alto rendimiento</button>
-      </div>
-      <p class="gpu-hint"></p>
-    </details>
   </div>`;
 sysGameEl.innerHTML = GAME_TEMPLATE;
+// El aviso de sensores vive dentro del espacio del juego (así no ocupa lugar aparte).
+sysGameEl.querySelector('.idle-text').appendChild(sysBannerEl);
+// La ventanita de gráfica se cierra al tocar fuera de ella.
+document.addEventListener('pointerdown', (e) => {
+  const d = sysGameEl.querySelector('.game-gpu');
+  if (d && d.open && !d.contains(e.target)) d.open = false;
+});
 const gm = {
   idle: sysGameEl.querySelector('.game-idle'),
   idleMsg: sysGameEl.querySelector('.idle-msg'),
@@ -785,7 +808,7 @@ function renderGame(s) {
   if (!g) {
     gm.idleMsg.textContent = s.sensors.helper
       ? 'Abre un juego y aquí verás sus FPS, temperaturas y uso del equipo en tiempo real.'
-      : 'Activa los sensores avanzados para ver los FPS y los datos del equipo cuando juegues.';
+      : '';   // sin sensores, el aviso de abajo ya explica qué hacer
     prefSent = null;
     return;
   }
@@ -802,13 +825,13 @@ function renderGame(s) {
     chips.push(metricChip(nm, gp.usage == null ? '–' : `${Math.round(gp.usage)}%`, fmtT(gp.temp), level(gp.usage, LIMITS.usage)));
     if (gp.vramTotal) {
       const vp = (gp.vramUsed / gp.vramTotal) * 100;
-      chips.push(metricChip(multi ? `VRAM ${i + 1}` : 'VRAM', `${gb(gp.vramUsed)} GB`, `de ${gb(gp.vramTotal)} GB`, level(vp, LIMITS.vram)));
+      chips.push(metricChip(multi ? `VRAM ${i + 1}` : 'VRAM', gb(gp.vramUsed), `de ${gb(gp.vramTotal)} GB`, level(vp, LIMITS.vram)));
     }
   });
   chips.splice(Math.min(1, chips.length), 0, metricChip('CPU', `${Math.round(s.cpu.usage)}%`, fmtT(s.cpu.temp), level(s.cpu.usage, LIMITS.usage)));
   const rp = (s.ram.used / s.ram.total) * 100;
-  chips.push(metricChip('RAM', `${gb(s.ram.used / 1048576)} GB`, `de ${gb(s.ram.total / 1048576)} GB`, level(rp, LIMITS.ram)));
-  if (s.general) chips.push(metricChip('Más caliente', `${Math.round(s.general.value)} °C`, s.general.name, level(s.general.value, LIMITS.hottest)));
+  chips.push(metricChip('RAM', gb(s.ram.used / 1048576), `de ${gb(s.ram.total / 1048576)} GB`, level(rp, LIMITS.ram)));
+  if (s.general) chips.push(metricChip('Caliente', `${Math.round(s.general.value)}°`, s.general.name, level(s.general.value, LIMITS.hottest)));
   gm.metrics.replaceChildren(...chips);
 
   // Gráfica en uso y si conviene cambiarla
@@ -921,7 +944,7 @@ function renderSystem(s, b) {
     big: Math.round(cpu.usage), unit: '%',
     temp: fmtT(cpu.temp), tempLevel: cpuTempLv, alert: cpuTempLv,
     pct: cpu.usage, level: level(cpu.usage, LIMITS.usage),
-    note: cpu.temp == null ? 'Temperatura: activa los sensores avanzados' : `Núcleo más cargado: ${Math.round(cpu.maxCore)}%`,
+    note: cpu.temp == null ? 'Temperatura: activa los sensores avanzados' : '',
   });
   if (cpuTempLv === 'hot') alerts.push({ key: 'cpu-temp', msg: `CPU a ${Math.round(cpu.temp)} °C: está muy caliente.` });
 
@@ -937,7 +960,7 @@ function renderSystem(s, b) {
       big: g.usage == null ? null : Math.round(g.usage), unit: g.usage == null ? '' : '%',
       temp: fmtT(g.temp), tempLevel: tLv, alert: tLv,
       pct: g.usage, level: level(g.usage, LIMITS.usage),
-      note: g.tempShared ? 'Gráfica integrada: comparte chip con la CPU, por eso muestra la temperatura del chip.' : (hasData ? '' : 'Detectada. Activa los sensores avanzados para ver su uso y temperatura.'),
+      note: g.tempShared ? 'Integrada: muestra la temperatura del chip' : (hasData ? '' : 'Detectada. Activa los sensores avanzados para ver su uso y temperatura.'),
     });
     if (tLv === 'hot') alerts.push({ key: `gpu-temp-${i}`, msg: `${label} a ${Math.round(g.temp)} °C: está muy caliente.` });
     if (g.vramTotal) {
@@ -965,7 +988,6 @@ function renderSystem(s, b) {
     sub: s.general.name,
     big: Math.round(s.general.value), unit: '°C',
     level: hotLv,
-    note: 'El sensor más caliente de todo el equipo (no es un promedio)',
   } : { note: 'Activa los sensores avanzados para ver las temperaturas' });
   if (hotLv === 'hot') alerts.push({ key: 'hottest', msg: `Un sensor llegó a ${Math.round(s.general.value)} °C (${s.general.name}).` });
 
@@ -1027,4 +1049,6 @@ setInterval(() => { if (!document.hidden && activeTab === 'home') refreshHomeApp
 setInterval(() => { if (!document.hidden && activeTab === 'apps') refreshApps(); }, 700);
 
 refresh();
+refreshPower();
+refreshSystem();
 setInterval(() => { if (!document.hidden) refreshActive(); }, 2000);
