@@ -1009,6 +1009,91 @@ function buildGpus(nvidia, lhmSensors, cpuTemp) {
   return gpus.sort((a, b) => (rank[a.vendor] ?? 9) - (rank[b.vendor] ?? 9));
 }
 
+// GPU "como el Administrador de tareas": uso = el motor más ocupado de cada tarjeta (3D, Compute, Copy, Video…)
+// y VRAM = "Memoria dedicada" que Windows lleva por tarjeta. Son los mismos contadores que usa el Administrador de
+// tareas; nvidia-smi mide otra cosa (por eso no coincidían). Se leen con un PowerShell que queda abierto.
+const gpuTm = { usage: new Map(), mem: new Map(), at: 0, proc: null, startedAt: 0, buf: '', tmpU: new Map(), tmpM: new Map() };
+function startGpuTm() {
+  if (gpuTm.proc || process.platform !== 'win32' || Date.now() - gpuTm.startedAt < 15000) return;
+  gpuTm.startedAt = Date.now();
+  const script = `$ErrorActionPreference = 'SilentlyContinue'
+while ($true) {
+  $eng = @{}
+  Get-CimInstance -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine | ForEach-Object {
+    if ($_.Name -match '^pid_\\d+_(luid_0x[0-9a-fA-F]+_0x[0-9a-fA-F]+_phys_\\d+_eng_\\d+)_engtype_') { $k = $matches[1]; $eng[$k] = [double]$eng[$k] + [double]$_.UtilizationPercentage }
+  }
+  $out = New-Object System.Text.StringBuilder
+  foreach ($k in $eng.Keys) { [void]$out.AppendLine('ENG|' + $k + '|' + $eng[$k]) }
+  Get-CimInstance -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory | ForEach-Object {
+    if ($_.Name -match '^(luid_0x[0-9a-fA-F]+_0x[0-9a-fA-F]+)_phys_\\d+') { [void]$out.AppendLine('MEM|' + $matches[1] + '|' + $_.DedicatedUsage) }
+  }
+  [void]$out.AppendLine('END')
+  try { [Console]::Out.Write($out.ToString()); [Console]::Out.Flush() } catch { break }
+  Start-Sleep -Milliseconds 400
+}`;
+  try {
+    const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+      { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    gpuTm.proc = proc; gpuTm.buf = ''; gpuTm.tmpU = new Map(); gpuTm.tmpM = new Map();
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (d) => {
+      gpuTm.buf += d;
+      const lines = gpuTm.buf.split(/\r?\n/);
+      gpuTm.buf = lines.pop();
+      for (const l of lines) {
+        if (l === 'END') {
+          // por tarjeta: el motor más ocupado
+          const usage = new Map();
+          for (const [k, v] of gpuTm.tmpU) usage.set(k, Math.max(usage.get(k) || 0, v));
+          gpuTm.usage = usage; gpuTm.mem = gpuTm.tmpM; gpuTm.at = Date.now();
+          gpuTm.tmpU = new Map(); gpuTm.tmpM = new Map();
+          continue;
+        }
+        let m = l.match(/^ENG\|luid_0x([0-9a-f]+)_0x([0-9a-f]+)_phys_\d+_eng_\d+\|([\d.,]+)/i);
+        if (m) {
+          const key = luidKey(m[1], m[2]);
+          // la clave guarda el motor más ocupado: se compara cada motor por separado
+          const eng = parseFloat(m[3].replace(',', '.'));
+          if (Number.isFinite(eng)) gpuTm.tmpU.set(key, Math.max(gpuTm.tmpU.get(key) || 0, eng));
+          continue;
+        }
+        m = l.match(/^MEM\|luid_0x([0-9a-f]+)_0x([0-9a-f]+)\|(\d+)/i);
+        if (m) gpuTm.tmpM.set(luidKey(m[1], m[2]), Number(m[3]));
+      }
+    });
+    const gone = () => { if (gpuTm.proc === proc) { gpuTm.proc = null; gpuTm.at = 0; } };
+    proc.on('exit', gone); proc.on('error', gone);
+  } catch { gpuTm.proc = null; }
+}
+
+// Qué número de tarjeta (LUID) de Windows corresponde a cada GPU que leímos por nvidia-smi / LibreHardwareMonitor
+function luidOfGpu(g) {
+  const names = gameGpu.luidNames;
+  if (!names || !names.size) return null;
+  const norm = (x) => String(x || '').toLowerCase().replace(/\(tm\)|\(r\)/g, '').replace(/[^a-z0-9]/g, '');
+  const all = [...names];
+  const same = all.filter(([, n]) => norm(n) === norm(g.name));
+  if (same.length === 1) return same[0][0];
+  const byVendor = all.filter(([, n]) => vendorOf(n) === g.vendor);
+  return byVendor.length === 1 ? byVendor[0][0] : null;
+}
+
+function applyTaskManagerGpu(gpus) {
+  startGpuTm();
+  loadLuidNames();
+  if (!gpuTm.at || Date.now() - gpuTm.at > 4000) return gpus;
+  return gpus.map((g) => {
+    const key = luidOfGpu(g);
+    if (!key) return g;
+    const c = { ...g };
+    const u = gpuTm.usage.get(key);
+    if (u != null) { c.usageSmi = g.usage; c.usage = Math.min(100, u); c.usageSource = 'windows'; }
+    const ded = gpuTm.mem.get(key);
+    if (ded != null && g.vramTotal) { c.vramSmi = g.vramUsed; c.vramUsed = Math.min(g.vramTotal, ded / 1048576); }
+    return c;
+  });
+}
+
 // LibreHardwareMonitor (si el ayudante está activo): temperatura de CPU, ventiladores, etc.
 function parseLhmValue(v) {
   const m = String(v == null ? '' : v).match(/-?\d[\d.,]*/);
@@ -1307,7 +1392,7 @@ ipcMain.handle('sys:state', async () => {
   const [nvidia, lhmSensors] = await Promise.all([readNvidia(), readLhm()]);
   lhmCache = { at: Date.now(), sensors: lhmSensors };
   const lhm = lhmSensors ? summarizeLhm(lhmSensors) : null;
-  const gpus = buildGpus(nvidia, lhmSensors, lhm ? lhm.cpuTemp : null);
+  const gpus = applyTaskManagerGpu(buildGpus(nvidia, lhmSensors, lhm ? lhm.cpuTemp : null));
   const helper = helperActive();
   const total = os.totalmem(), free = os.freemem();
 
@@ -1414,6 +1499,7 @@ async function buildDiag() {
   L.push(`CPU, lo que muestra la app ahora: ${cpuLast.usage.toFixed(1)} %`);
   const nvl = nvStream.latest || [];
   L.push(`GPU NVIDIA (nvidia-smi, flujo ${nvStream.proc ? 'activo' : 'detenido'}): ${nvl.length ? nvl.map((g) => `${g.usage} % uso, ${g.temp} °C, VRAM ${g.vramUsed}/${g.vramTotal} MB`).join(' | ') + ' (hace ' + ago(nvStream.at) + ')' : 'SIN DATO'}`);
+  L.push(`GPU, como el Administrador de tareas (contadores de Windows, ayudante ${gpuTm.proc ? 'corriendo' : 'detenido'}): ${gpuTm.at ? [...gpuTm.usage].map(([k, v]) => `tarjeta ${gameGpu.luidNames && gameGpu.luidNames.get(k) || k}: uso ${v.toFixed(1)} %, VRAM dedicada ${((gpuTm.mem.get(k) || 0) / 1073741824).toFixed(2)} GB`).join(' | ') + ' (hace ' + ago(gpuTm.at) + ')' : 'SIN DATO'}`);
   L.push(`RAM: usada ${((os.totalmem() - os.freemem()) / 1073741824).toFixed(1)} GB de ${(os.totalmem() / 1073741824).toFixed(1)} GB (disponible ${(os.freemem() / 1073741824).toFixed(1)} GB)`);
   try {
     const eng = await new Promise((resolve) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', psEncoded(`$s=@{}
@@ -1693,5 +1779,6 @@ if (!app.requestSingleInstanceLock()) {
     if (fa.proc) { try { fa.proc.kill(); } catch {} }
     if (nvStream.proc) { try { nvStream.proc.kill(); } catch {} }
     if (cpuUtil.proc) { try { cpuUtil.proc.kill(); } catch {} }
+    if (gpuTm.proc) { try { gpuTm.proc.kill(); } catch {} }
   });
 }
