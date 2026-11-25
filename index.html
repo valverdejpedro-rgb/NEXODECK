@@ -12,8 +12,6 @@
     <nav class="tabs" role="tablist" aria-label="Secciones">
       <button class="tab active" type="button" role="tab" data-tab="home" aria-selected="true">Inicio</button>
       <button class="tab" type="button" role="tab" data-tab="apps" aria-selected="false" tabindex="-1">Aplicaciones</button>
-      <button class="tab" type="button" role="tab" data-tab="power" aria-selected="false" tabindex="-1">Energía</button>
-      <button class="tab" type="button" role="tab" data-tab="system" aria-selected="false" tabindex="-1">Estado del sistema</button>
     </nav>
 
     <div id="tab-home" class="tab-panel" role="tabpanel">
@@ -21,6 +19,19 @@
         <strong>Tu equipo está muy exigido</strong>
         <ul id="home-alert-list"></ul>
       </section>
+
+      <section id="sys-banner" class="panel sys-banner" hidden>
+        <p id="sys-banner-text"></p>
+        <button id="sys-enable" class="action" type="button">Activar sensores avanzados</button>
+      </section>
+      <p id="sys-error" class="error" hidden></p>
+
+      <!-- Espacio fijo para el juego: FPS y datos en vivo -->
+      <section id="sys-game" class="panel game" hidden></section>
+
+      <h2 class="sect"><span>Perfil de energía</span></h2>
+      <div id="power-list" class="plans"></div>
+      <p id="power-error" class="error" hidden></p>
 
       <h2 class="sect"><span>Audio del equipo</span></h2>
       <div id="home-devs" class="home-grid">
@@ -76,26 +87,6 @@
       <div id="apps-list"></div>
       <p id="apps-empty" class="empty" hidden>No hay aplicaciones con audio abiertas. Abre un video o música y aparecerá aquí.</p>
       <p id="apps-error" class="error" hidden></p>
-    </div>
-
-    <div id="tab-power" class="tab-panel" role="tabpanel" hidden>
-      <p id="power-count" class="count"></p>
-      <div id="power-list"></div>
-      <p id="power-error" class="error" hidden></p>
-    </div>
-
-    <div id="tab-system" class="tab-panel" role="tabpanel" hidden>
-      <section id="sys-banner" class="panel sys-banner" hidden>
-        <p id="sys-banner-text"></p>
-        <button id="sys-enable" class="action" type="button">Activar sensores avanzados</button>
-      </section>
-      <section id="sys-alert" class="panel sys-alert" role="alert" hidden>
-        <strong>Tu equipo está muy exigido</strong>
-        <ul id="sys-alert-list"></ul>
-      </section>
-      <section id="sys-game" class="panel game" hidden></section>
-      <div id="sys-grid" class="sys-grid"></div>
-      <p id="sys-error" class="error" hidden></p>
     </div>
 
     <footer>

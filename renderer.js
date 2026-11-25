@@ -224,17 +224,14 @@ const tabBtns = [...document.querySelectorAll('.tab')];
 const tabPanels = {
   home: document.getElementById('tab-home'),
   apps: document.getElementById('tab-apps'),
-  power: document.getElementById('tab-power'),
-  system: document.getElementById('tab-system'),
 };
 let activeTab = 'home';
 
 function refreshActive() {
   if (activeTab === 'apps') return refreshApps();
-  if (activeTab === 'power') return refreshPower();
-  if (activeTab === 'system') return refreshSystem();
   refreshHomeApps();
-  refreshHomeSystem();
+  refreshSystem();
+  refreshPower();
   return refresh();
 }
 
@@ -552,7 +549,6 @@ function refreshAppsView() {
 /* ---------- Perfiles de energía ---------- */
 
 const powerListEl = document.getElementById('power-list');
-const powerCountEl = document.getElementById('power-count');
 const powerErrorEl = document.getElementById('power-error');
 let powerBusy = 0;
 let powerSig = '';
@@ -579,7 +575,6 @@ function renderPower(plans) {
     b.addEventListener('click', () => choosePlan(p.id));
     return b;
   }));
-  powerCountEl.textContent = plans.length === 1 ? '1 perfil de energía' : `${plans.length} perfiles de energía`;
 }
 
 async function choosePlan(id) {
@@ -614,14 +609,12 @@ async function refreshPower() {
 
 /* ---------- Estado del sistema ---------- */
 
-const sysGridEl = document.getElementById('sys-grid');
+const sysGridEl = document.getElementById('home-sys');
 const sysErrorEl = document.getElementById('sys-error');
 const sysBannerEl = document.getElementById('sys-banner');
 const sysBannerText = document.getElementById('sys-banner-text');
 const sysEnableBtn = document.getElementById('sys-enable');
 const sysGameEl = document.getElementById('sys-game');
-const sysAlertEl = document.getElementById('sys-alert');
-const sysAlertList = document.getElementById('sys-alert-list');
 const homeAlertEl = document.getElementById('home-alert');
 const homeAlertList = document.getElementById('home-alert-list');
 const sysCards = {};
@@ -714,7 +707,10 @@ function setStatOn(c, o) {
 
 /* Juego: FPS actual, más bajo / más alto y gráfica que usa */
 const GAME_TEMPLATE = `
-  <div class="game-idle"></div>
+  <div class="game-idle">
+    <div class="idle-fps"><span>–</span><small>FPS</small></div>
+    <div class="idle-text"><b>Sin juego detectado</b><p class="idle-msg"></p></div>
+  </div>
   <div class="game-body" hidden>
     <div class="game-top">
       <div class="game-id">
@@ -727,8 +723,9 @@ const GAME_TEMPLATE = `
         <button class="mini reset-range" type="button">Reiniciar</button>
       </div>
     </div>
-    <div class="game-gpu">
-      <div class="gpu-line"><span class="gpu-lbl">Gráfica que usa el juego</span><b class="gpu-name">Detectando…</b></div>
+    <div class="game-metrics"></div>
+    <details class="game-gpu">
+      <summary>Gráfica que usa el juego: <b class="gpu-name">Detectando…</b></summary>
       <p class="gpu-msg"></p>
       <div class="gpu-pref" role="group" aria-label="Gráfica preferida por Windows para este juego">
         <button type="button" data-pref="0">Windows decide</button>
@@ -736,17 +733,19 @@ const GAME_TEMPLATE = `
         <button type="button" data-pref="2">Alto rendimiento</button>
       </div>
       <p class="gpu-hint"></p>
-    </div>
+    </details>
   </div>`;
 sysGameEl.innerHTML = GAME_TEMPLATE;
 const gm = {
   idle: sysGameEl.querySelector('.game-idle'),
+  idleMsg: sysGameEl.querySelector('.idle-msg'),
   body: sysGameEl.querySelector('.game-body'),
   title: sysGameEl.querySelector('.game-title'),
   fps: sysGameEl.querySelector('.fps'),
   min: sysGameEl.querySelector('.rmin'),
   max: sysGameEl.querySelector('.rmax'),
   reset: sysGameEl.querySelector('.reset-range'),
+  metrics: sysGameEl.querySelector('.game-metrics'),
   gpuName: sysGameEl.querySelector('.gpu-name'),
   gpuMsg: sysGameEl.querySelector('.gpu-msg'),
   prefBox: sysGameEl.querySelector('.gpu-pref'),
@@ -765,14 +764,28 @@ gm.prefBtns.forEach((b) => b.addEventListener('click', async () => {
   else gm.hint.textContent = 'Guardado. Cierra el juego y vuelve a abrirlo para que Windows use esta gráfica.';
 }));
 
+// Tarjetitas de datos en vivo dentro del espacio del juego
+function metricChip(label, value, sub, lv) {
+  const d = document.createElement('div');
+  d.className = 'chip';
+  d.dataset.level = lv || '';
+  const l = document.createElement('span'); l.className = 'chip-lbl'; l.textContent = label;
+  const v = document.createElement('b'); v.className = 'chip-val'; v.textContent = value;
+  d.append(l, v);
+  if (sub) { const u = document.createElement('span'); u.className = 'chip-sub'; u.textContent = sub; d.append(u); }
+  return d;
+}
+
 function renderGame(s) {
-  if (!s.sensors.helper) { sysGameEl.hidden = true; return; }
   sysGameEl.hidden = false;
   const g = s.game;
   gm.idle.hidden = !!g;
   gm.body.hidden = !g;
+  sysGameEl.classList.toggle('live', !!g);
   if (!g) {
-    gm.idle.textContent = 'Sin juego detectado. Abre un juego y aquí verás sus FPS.';
+    gm.idleMsg.textContent = s.sensors.helper
+      ? 'Abre un juego y aquí verás sus FPS, temperaturas y uso del equipo en tiempo real.'
+      : 'Activa los sensores avanzados para ver los FPS y los datos del equipo cuando juegues.';
     prefSent = null;
     return;
   }
@@ -780,6 +793,23 @@ function renderGame(s) {
   gm.fps.textContent = Math.round(g.fps);
   gm.min.textContent = g.min == null ? '–' : Math.round(g.min);
   gm.max.textContent = g.max == null ? '–' : Math.round(g.max);
+
+  // Datos en vivo del equipo mientras se juega
+  const chips = [];
+  const multi = s.gpus.length > 1;
+  s.gpus.forEach((gp, i) => {
+    const nm = multi ? `GPU ${i + 1}` : 'GPU';
+    chips.push(metricChip(nm, gp.usage == null ? '–' : `${Math.round(gp.usage)}%`, fmtT(gp.temp), level(gp.usage, LIMITS.usage)));
+    if (gp.vramTotal) {
+      const vp = (gp.vramUsed / gp.vramTotal) * 100;
+      chips.push(metricChip(multi ? `VRAM ${i + 1}` : 'VRAM', `${gb(gp.vramUsed)} GB`, `de ${gb(gp.vramTotal)} GB`, level(vp, LIMITS.vram)));
+    }
+  });
+  chips.splice(Math.min(1, chips.length), 0, metricChip('CPU', `${Math.round(s.cpu.usage)}%`, fmtT(s.cpu.temp), level(s.cpu.usage, LIMITS.usage)));
+  const rp = (s.ram.used / s.ram.total) * 100;
+  chips.push(metricChip('RAM', `${gb(s.ram.used / 1048576)} GB`, `de ${gb(s.ram.total / 1048576)} GB`, level(rp, LIMITS.ram)));
+  if (s.general) chips.push(metricChip('Más caliente', `${Math.round(s.general.value)} °C`, s.general.name, level(s.general.value, LIMITS.hottest)));
+  gm.metrics.replaceChildren(...chips);
 
   // Gráfica en uso y si conviene cambiarla
   const gp = g.gpu;
@@ -837,27 +867,53 @@ function updateAlerts(found) {
     if (a.streak <= -4) alertState.delete(key);
   }
   const active = [...alertState.values()].filter((a) => a.on);
-  for (const [box, list] of [[sysAlertEl, sysAlertList], [homeAlertEl, homeAlertList]]) {
+  for (const [box, list] of [[homeAlertEl, homeAlertList]]) {
     box.hidden = !active.length;
     list.replaceChildren(...active.map((a) => { const li = document.createElement('li'); li.textContent = a.msg; return li; }));
   }
 }
 
-function renderSystem(s) {
-  const { cpu, gpus, ram } = s;
-  const alerts = [];
-  const multi = gpus.length > 1;
+function setBattery(b, alerts) {
+  const pct = Math.round(b.level * 100);
+  const lvl = b.charging ? 'ok' : pct <= 15 ? 'hot' : pct <= 30 ? 'warm' : 'ok';
+  const left = b.charging ? (b.level < 1 ? fmtDur(b.chargingTime) : '') : fmtDur(b.dischargingTime);
+  setStat('bat', {
+    sub: b.charging ? (b.level >= 1 ? 'Conectada' : 'Cargando') : 'Usando batería',
+    big: pct, unit: '%', pct, level: lvl,
+    note: left ? (b.charging ? `Carga completa en ${left}` : `Quedan unos ${left}`) : '',
+  });
+  if (!b.charging && pct <= 15) alerts.push({ key: 'bat', msg: `Batería baja: ${pct}%.` });
+}
 
-  const ids = ['cpu'];
-  const titles = { cpu: 'CPU', ram: 'RAM', general: 'Punto más caliente', fans: 'Ventiladores' };
+function fmtDur(sec) {
+  if (!isFinite(sec) || sec <= 0) return '';
+  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+  return h ? `${h} h ${m} min` : `${m} min`;
+}
+
+function renderSystem(s, b) {
+  const alerts = [];
+  const ids = [];
+  const titles = { bat: 'Batería', cpu: 'CPU', ram: 'RAM', general: 'Punto más caliente', fans: 'Ventiladores' };
+  if (b) ids.push('bat');
+  if (!s) {                                  // sin lecturas del sistema: solo se muestra la batería
+    syncCards(ids, titles);
+    if (b) setBattery(b, alerts);
+    updateAlerts(alerts);
+    return;
+  }
+  const { cpu, gpus, ram } = s;
+  const multi = gpus.length > 1;
+  ids.push('cpu');
   gpus.forEach((g, i) => {
     ids.push(`gpu${i}`);
     titles[`gpu${i}`] = multi ? `GPU ${i + 1}` : 'GPU';
     if (g.vramTotal) { ids.push(`vram${i}`); titles[`vram${i}`] = multi ? `VRAM · GPU ${i + 1}` : 'VRAM'; }
   });
   ids.push('ram', 'general', 'fans');
-  if (!gpus.length) { ids.splice(1, 0, 'gpu0'); titles.gpu0 = 'GPU'; }
+  if (!gpus.length) { ids.splice(ids.indexOf('cpu') + 1, 0, 'gpu0'); titles.gpu0 = 'GPU'; }
   syncCards(ids, titles);
+  if (b) setBattery(b, alerts);
 
   const cpuTempLv = level(cpu.temp, limitsFor(cpu.tempLimit, LIMITS.cpuTemp));
   setStat('cpu', {
@@ -928,15 +984,24 @@ function renderSystem(s) {
   renderGame(s);
 }
 
+let batMgr = null;          // administrador de batería de Chromium (navigator.getBattery)
+let batFailed = false;
+async function readBattery() {
+  if (batFailed || typeof navigator.getBattery !== 'function') return null;
+  try {
+    if (!batMgr) batMgr = await navigator.getBattery();
+    return batMgr;
+  } catch { batFailed = true; return null; }
+}
+
 async function refreshSystem() {
   if (sysBusy) return;
   sysBusy = true;
   try {
-    renderSystem(await window.api.getSystem());
-    sysErrorEl.hidden = true;
-  } catch {
-    sysErrorEl.hidden = false;
-    sysErrorEl.textContent = 'No se pudo leer el estado del sistema.';
+    let s = null;
+    try { s = await window.api.getSystem(); sysErrorEl.hidden = true; }
+    catch { sysErrorEl.hidden = false; sysErrorEl.textContent = 'No se pudo leer el estado del sistema.'; }
+    renderSystem(s, await readBattery());
   } finally { sysBusy = false; }
 }
 
@@ -954,123 +1019,11 @@ sysEnableBtn.addEventListener('click', async () => {
 });
 
 
-/* ---------- Inicio: batería y sistema ---------- */
-
-const homeSysEl = document.getElementById('home-sys');
-const homeCards = {};
-let homeSysOrder = '';
-let batMgr = null;          // administrador de batería de Chromium (navigator.getBattery)
-let batFailed = false;
-
-async function readBattery() {
-  if (batFailed || typeof navigator.getBattery !== 'function') return null;
-  try {
-    if (!batMgr) batMgr = await navigator.getBattery();
-    return batMgr;
-  } catch { batFailed = true; return null; }
-}
-const fmtDur = (sec) => {
-  if (!isFinite(sec) || sec <= 0) return '';
-  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
-  return h ? `${h} h ${m} min` : `${m} min`;
-};
-
-// Pone/actualiza una tarjeta de la rejilla de Inicio (se crean al primer uso).
-function homeStat(ids, id, title, o) {
-  if (!homeCards[id]) homeCards[id] = buildStat(title);
-  homeCards[id].title.textContent = title;
-  setStatOn(homeCards[id], o);
-  ids.push(id);
-}
-
-async function renderHomeSystem(s) {
-  const ids = [];
-  const alerts = [];
-
-  const b = await readBattery();
-  if (b) {
-    const pct = Math.round(b.level * 100);
-    const lvl = b.charging ? 'ok' : pct <= 15 ? 'hot' : pct <= 30 ? 'warm' : 'ok';
-    const left = b.charging ? (b.level < 1 ? fmtDur(b.chargingTime) : '') : fmtDur(b.dischargingTime);
-    homeStat(ids, 'bat', 'Batería', {
-      sub: b.charging ? (b.level >= 1 ? 'Conectada' : 'Cargando') : 'Usando batería',
-      big: pct, unit: '%', pct, level: lvl,
-      note: left ? (b.charging ? `Carga completa en ${left}` : `Quedan unos ${left}`) : '',
-    });
-    if (!b.charging && pct <= 15) alerts.push({ key: 'bat', msg: `Batería baja: ${pct}%.` });
-  }
-
-  if (s) {
-    const { cpu, gpus, ram } = s;
-    const multi = gpus.length > 1;
-
-    const cpuLv = level(cpu.temp, limitsFor(cpu.tempLimit, LIMITS.cpuTemp));
-    homeStat(ids, 'cpu', 'CPU', {
-      sub: `${cpu.cores} hilos`, big: Math.round(cpu.usage), unit: '%',
-      temp: fmtT(cpu.temp), tempLevel: cpuLv, alert: cpuLv,
-      pct: cpu.usage, level: level(cpu.usage, LIMITS.usage),
-    });
-    if (cpuLv === 'hot') alerts.push({ key: 'cpu-temp', msg: `CPU a ${Math.round(cpu.temp)} °C: está muy caliente.` });
-
-    gpus.forEach((g, i) => {
-      const label = multi ? `GPU ${i + 1}` : 'GPU';
-      const tLv = level(g.temp, limitsFor(g.tempLimit, LIMITS.gpuTemp));
-      homeStat(ids, `gpu${i}`, label, {
-        sub: (g.name || '').replace(/^NVIDIA\s+/i, '').replace(/GeForce\s+/i, '').replace(/^AMD\s+/i, '').replace(/\s*\(TM\)/gi, ''),
-        big: g.usage == null ? null : Math.round(g.usage), unit: g.usage == null ? '' : '%',
-        temp: fmtT(g.temp), tempLevel: tLv, alert: tLv,
-        pct: g.usage, level: level(g.usage, LIMITS.usage),
-        note: g.usage == null && g.temp == null ? 'Activa los sensores avanzados (pestaña Estado del sistema)' : '',
-      });
-      if (tLv === 'hot') alerts.push({ key: `gpu-temp-${i}`, msg: `${label} a ${Math.round(g.temp)} °C: está muy caliente.` });
-      if (g.vramTotal) {
-        const vp = (g.vramUsed / g.vramTotal) * 100;
-        if (level(vp, LIMITS.vram) === 'hot') alerts.push({ key: `vram-${i}`, msg: `Memoria de video casi llena${multi ? ` (${label})` : ''}: ${Math.round(vp)}%.` });
-      }
-    });
-
-    const ramPct = (ram.used / ram.total) * 100;
-    const ramLv = level(ramPct, LIMITS.ram);
-    homeStat(ids, 'ram', 'RAM', {
-      sub: `${gb(ram.total / 1048576)} GB en total`, big: gb(ram.used / 1048576), unit: 'GB', pct: ramPct, level: ramLv,
-    });
-    if (ramLv === 'hot') alerts.push({ key: 'ram', msg: `RAM casi llena: ${Math.round(ramPct)}% en uso.` });
-
-    if (s.general) {
-      const hotLv = level(s.general.value, LIMITS.hottest);
-      homeStat(ids, 'general', 'Punto más caliente', { sub: s.general.name, big: Math.round(s.general.value), unit: '°C', level: hotLv });
-      if (hotLv === 'hot') alerts.push({ key: 'hottest', msg: `Un sensor llegó a ${Math.round(s.general.value)} °C (${s.general.name}).` });
-    }
-    updateAlerts(alerts);
-  } else if (b) updateAlerts(alerts);
-
-  // Se quitan las tarjetas que ya no aplican y se colocan en orden (solo se toca el DOM si cambió algo).
-  for (const id of Object.keys(homeCards)) {
-    if (!ids.includes(id)) { homeCards[id].el.remove(); delete homeCards[id]; }
-  }
-  const key = ids.join('|');
-  if (key !== homeSysOrder) {
-    homeSysOrder = key;
-    for (const id of ids) homeSysEl.appendChild(homeCards[id].el);
-  }
-}
-
-let homeSysBusy = false;
-async function refreshHomeSystem() {
-  if (homeSysBusy) return;
-  homeSysBusy = true;
-  try {
-    let s = null;
-    try { s = await window.api.getSystem(); } catch {}
-    await renderHomeSystem(s);
-  } finally { homeSysBusy = false; }
-}
-
-setInterval(() => { if (!document.hidden && activeTab === 'system') refreshSystem(); }, 500);
+// El sistema y los FPS se leen cada medio segundo mientras se ve Inicio.
+setInterval(() => { if (!document.hidden && activeTab === 'home') refreshSystem(); }, 500);
 // Volumen y silencio se leen directo de Windows (milisegundos), así que se pueden consultar muy seguido.
 setInterval(() => { if (!document.hidden && activeTab === 'home') refresh(); }, 400);
 setInterval(() => { if (!document.hidden && activeTab === 'home') refreshHomeApps(); }, 700);
-setInterval(() => { if (!document.hidden && activeTab === 'home') refreshHomeSystem(); }, 1000);
 setInterval(() => { if (!document.hidden && activeTab === 'apps') refreshApps(); }, 700);
 
 refresh();
