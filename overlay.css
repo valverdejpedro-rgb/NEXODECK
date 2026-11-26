@@ -1,0 +1,63 @@
+/* Overlay: siempre oscuro (se ve sobre cualquier juego) y escalable con el ajuste de tamaño */
+:root { --s: 1; --op: .85; --accent: #3cc7b6; --ok: #4ade80; --warm: #fbbf24; --hot: #f87171; }
+* { box-sizing: border-box; margin: 0; }
+html { font-size: calc(14px * var(--s)); background: transparent; }
+body {
+  background: transparent; overflow: hidden; color: #fff; user-select: none;
+  font: 1rem/1.25 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+}
+[hidden] { display: none !important; }
+
+#ov {
+  display: inline-block; vertical-align: top; cursor: move; touch-action: none;
+  padding: .25rem .6rem .5rem; border-radius: .8rem;
+  background: rgba(12, 15, 22, var(--op)); border: 1px solid rgba(255, 255, 255, .14);
+}
+
+#bar { display: flex; align-items: center; gap: .15rem; height: 2rem; margin: 0 -.25rem .1rem; }
+.grip { color: rgba(255, 255, 255, .35); font-size: 1rem; letter-spacing: -.15em; padding-left: .2rem; }
+.spacer { flex: 1; min-width: .6rem; }
+#bar button {
+  width: 2rem; height: 2rem; display: grid; place-items: center; cursor: pointer;
+  background: transparent; color: rgba(255, 255, 255, .55); border: 0; border-radius: .5rem;
+}
+#bar button:hover, #bar button:active { background: rgba(255, 255, 255, .16); color: #fff; }
+#bar button.on { color: var(--accent); }
+#bar svg { width: 1.15rem; height: 1.15rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ----- datos ----- */
+.rows { display: flex; gap: .15rem; }
+.v .rows { flex-direction: column; min-width: 11rem; }
+.h .rows { flex-direction: row; gap: 1.1rem; align-items: flex-start; }
+.cell { display: flex; align-items: baseline; gap: .6rem; }
+.v .cell { justify-content: space-between; }
+.h .cell { flex-direction: column; align-items: flex-start; gap: 0; }
+.lbl { font-size: .7rem; font-weight: 700; letter-spacing: .07em; color: rgba(255, 255, 255, .55); text-transform: uppercase; white-space: nowrap; }
+.vv { display: flex; align-items: baseline; gap: .45rem; white-space: nowrap; }
+.val { font-size: 1.35rem; font-weight: 700; line-height: 1.15; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.val small { font-size: .7rem; font-weight: 600; opacity: .7; margin-left: .12rem; letter-spacing: 0; }
+.ext { font-size: .85rem; font-weight: 600; color: rgba(255, 255, 255, .72); font-variant-numeric: tabular-nums; }
+.cell.fps .val { font-size: 2.1rem; color: var(--accent); }
+.cell.fps .lbl { color: var(--accent); }
+.dim { opacity: .45; }
+.ok { color: var(--ok); }
+.warm { color: var(--warm); }
+.hot { color: var(--hot); }
+.cell.fps .val.dim { color: #fff; }
+.none { font-size: .8rem; color: rgba(255, 255, 255, .6); max-width: 12rem; }
+
+/* ----- ajustes ----- */
+#cfg { margin-top: .4rem; padding-top: .4rem; border-top: 1px solid rgba(255, 255, 255, .14); width: 15.5rem; display: grid; gap: .35rem; cursor: default; }
+.cfg-title { font-size: .7rem; font-weight: 700; letter-spacing: .07em; color: rgba(255, 255, 255, .55); text-transform: uppercase; }
+.opts { display: grid; grid-template-columns: repeat(3, 1fr); gap: .3rem; }
+.opts.two { grid-template-columns: repeat(2, 1fr); }
+#cfg button {
+  min-height: 2.3rem; padding: 0 .3rem; font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer;
+  color: rgba(255, 255, 255, .7); background: rgba(255, 255, 255, .07); border: 1px solid rgba(255, 255, 255, .14); border-radius: .5rem;
+}
+#cfg button.on { color: #0c0f16; background: var(--accent); border-color: var(--accent); }
+#cfg button:active { filter: brightness(1.2); }
+.cfg-row { display: grid; grid-template-columns: 1fr 2.4rem 3rem 2.4rem; align-items: center; gap: .3rem; font-size: .85rem; }
+.cfg-row b { text-align: center; font-variant-numeric: tabular-nums; }
+.cfg-row button { font-size: 1.1rem; }
+.hint { font-size: .68rem; color: rgba(255, 255, 255, .5); }

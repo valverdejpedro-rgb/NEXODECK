@@ -1436,7 +1436,7 @@ function wmiFans() {
   return j && Array.isArray(j.fans) ? j.fans.filter((f) => f && Number.isFinite(f.rpm)).map((f) => ({ name: String(f.name), rpm: Math.round(f.rpm) })) : [];
 }
 
-ipcMain.handle('sys:state', async () => {
+async function computeSysState() {
   // Si hace rato que no se mide (la pestaña estaba cerrada), la primera lectura promediaría todo ese tiempo
   // y saldría un valor sin sentido: se toma una referencia nueva y se mide una ventana corta.
   if (Date.now() - cpuLastAt > 3000) {
@@ -1474,6 +1474,14 @@ ipcMain.handle('sys:state', async () => {
     sensors: { lhm: !!lhm, helper, hasFiles: fs.existsSync(HELPER_PS1) },
     game: game ? { name: game.name, fps: game.fps, min: gameStats.min, max: gameStats.max, ...gameGpuInfo() } : null,
   };
+}
+// La ventana principal y el overlay pueden pedir el estado casi a la vez: se calcula una sola vez cada 300 ms.
+const sysShared = { at: 0, p: null };
+ipcMain.handle('sys:state', () => {
+  if (sysShared.p && Date.now() - sysShared.at < 300) return sysShared.p;
+  sysShared.at = Date.now();
+  sysShared.p = computeSysState().catch((e) => { sysShared.p = null; throw e; });
+  return sysShared.p;
 });
 
 // Lanza el ayudante con permisos de administrador (Windows pide confirmación).
@@ -1722,11 +1730,142 @@ function createWindow() {
   win.on('focus', () => { invalidateRows(); win.webContents.send('ui:shown'); });
   win.on('restore', () => { invalidateRows(); win.webContents.send('ui:shown'); });
 
+  win.on('closed', () => { if (overlayOpen()) overlayWin.destroy(); });
+
   win.on('close', (e) => {
     try { settings.bounds = win.getNormalBounds(); saveSettings(); } catch {}
     // Con "Mantener en segundo plano" la X solo oculta la ventana; si no, cierra el programa.
     if (!quitting && settings.keepInTray) { e.preventDefault(); win.hide(); }
   });
+}
+
+/* ---------- Overlay: datos sobre el juego, al estilo de MSI Afterburner ---------- */
+
+const OVERLAY_SHORTCUT = 'Control+Alt+O';       // mostrar / ocultar
+const OVERLAY_LOCK_SHORTCUT = 'Control+Alt+L';  // bloquear / desbloquear (bloqueado: los clics lo atraviesan)
+const OVERLAY_DEFAULTS = {
+  enabled: false, orient: 'v', scale: 1, opacity: 0.85, locked: false,
+  items: { fps: true, gpu: true, vram: true, cpu: true, ram: true, range: false },
+};
+let overlayWin = null;
+let ovDrag = null;
+
+function overlayCfg() {
+  const o = settings.overlay || {};
+  return { ...OVERLAY_DEFAULTS, ...o, items: { ...OVERLAY_DEFAULTS.items, ...(o.items || {}) } };
+}
+const overlayOpen = () => !!(overlayWin && !overlayWin.isDestroyed());
+function overlayState() { return { ...overlayCfg(), open: overlayOpen() }; }
+
+function broadcastOverlay(forceOpen) {
+  const st = overlayState();
+  if (typeof forceOpen === 'boolean') st.open = forceOpen;
+  for (const w of [win, overlayWin]) {
+    if (w && !w.isDestroyed()) { try { w.webContents.send('overlay:changed', st); } catch {} }
+  }
+  return st;
+}
+
+// Posición guardada si sigue dentro de una pantalla conectada; si no, esquina superior izquierda de la principal.
+function overlaySpot() {
+  const o = settings.overlay || {};
+  const ok = Number.isFinite(o.x) && Number.isFinite(o.y) && screen.getAllDisplays().some((d) => {
+    const a = d.workArea;
+    return o.x + 40 > a.x && o.y + 20 > a.y && o.x < a.x + a.width - 40 && o.y < a.y + a.height - 20;
+  });
+  if (ok) return { x: Math.round(o.x), y: Math.round(o.y) };
+  const a = screen.getPrimaryDisplay().workArea;
+  return { x: a.x + 20, y: a.y + 20 };
+}
+
+function applyOverlayLock() {
+  if (overlayOpen()) { try { overlayWin.setIgnoreMouseEvents(!!overlayCfg().locked, { forward: true }); } catch {} }
+}
+
+function openOverlay() {
+  if (overlayOpen()) return;
+  const pos = overlaySpot();
+  overlayWin = new BrowserWindow({
+    width: 240, height: 140, x: pos.x, y: pos.y,
+    frame: false, transparent: true, backgroundColor: '#00000000', hasShadow: false,
+    resizable: false, maximizable: false, minimizable: false, fullscreenable: false,
+    skipTaskbar: true, focusable: false,       // focusable:false → no le quita el foco al juego
+    alwaysOnTop: true, show: false,
+    title: 'Overlay',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true, nodeIntegration: false, sandbox: true,
+    },
+  });
+  overlayWin.setAlwaysOnTop(true, 'screen-saver');   // por encima de juegos en ventana sin bordes
+  overlayWin.setMenuBarVisibility(false);
+  overlayWin.loadFile('overlay.html');
+  overlayWin.once('ready-to-show', () => { applyOverlayLock(); if (overlayOpen()) overlayWin.showInactive(); });
+  overlayWin.on('closed', () => { overlayWin = null; ovDrag = null; broadcastOverlay(false); });
+}
+
+function setOverlayEnabled(on) {
+  settings.overlay = { ...overlayCfg(), enabled: !!on };
+  saveSettings();
+  if (on) openOverlay(); else if (overlayOpen()) overlayWin.close();
+  return broadcastOverlay(!!on);
+}
+
+ipcMain.handle('overlay:state', () => overlayState());
+ipcMain.handle('overlay:toggle', () => setOverlayEnabled(!overlayOpen()));
+ipcMain.on('overlay:close', () => { setOverlayEnabled(false); });
+ipcMain.handle('overlay:set', (_e, patch) => {
+  const n = overlayCfg();
+  if (patch && typeof patch === 'object') {
+    if (patch.orient === 'h' || patch.orient === 'v') n.orient = patch.orient;
+    if (Number.isFinite(patch.scale)) n.scale = Math.min(1.8, Math.max(0.7, patch.scale));
+    if (Number.isFinite(patch.opacity)) n.opacity = Math.min(1, Math.max(0.3, patch.opacity));
+    if (typeof patch.locked === 'boolean') n.locked = patch.locked;
+    if (patch.items && typeof patch.items === 'object') {
+      for (const k of Object.keys(OVERLAY_DEFAULTS.items)) if (typeof patch.items[k] === 'boolean') n.items = { ...n.items, [k]: patch.items[k] };
+    }
+  }
+  settings.overlay = n;
+  saveSettings();
+  applyOverlayLock();
+  return broadcastOverlay();
+});
+
+// El overlay mide su contenido y pide que la ventana tenga justo ese tamaño.
+ipcMain.on('overlay:size', (_e, w, h) => {
+  if (!overlayOpen()) return;
+  w = Math.round(Math.min(Math.max(Number(w) || 0, 60), 1400));
+  h = Math.round(Math.min(Math.max(Number(h) || 0, 30), 900));
+  const b = overlayWin.getBounds();
+  if (b.width === w && b.height === h) return;
+  const a = screen.getDisplayMatching(b).workArea;
+  let x = b.x, y = b.y;
+  if (x + w > a.x + a.width) x = a.x + a.width - w;
+  if (y + h > a.y + a.height) y = a.y + a.height - h;
+  x = Math.max(a.x, x); y = Math.max(a.y, y);
+  overlayWin.setBounds({ x, y, width: w, height: h });
+});
+
+// Arrastre hecho por nosotros (funciona igual con mouse y con dedo, sin ventana activa).
+ipcMain.on('overlay:drag', (_e, d) => {
+  if (!overlayOpen() || !d || !Number.isFinite(d.x) || !Number.isFinite(d.y)) return;
+  if (d.phase === 'start') ovDrag = { mx: d.x, my: d.y, b: overlayWin.getBounds() };
+  else if (d.phase === 'move' && ovDrag) {
+    overlayWin.setBounds({ x: Math.round(ovDrag.b.x + d.x - ovDrag.mx), y: Math.round(ovDrag.b.y + d.y - ovDrag.my), width: ovDrag.b.width, height: ovDrag.b.height });
+  } else if (d.phase === 'end') {
+    ovDrag = null;
+    const b = overlayWin.getBounds();
+    settings.overlay = { ...overlayCfg(), x: b.x, y: b.y };
+    saveSettings();
+  }
+});
+
+function toggleOverlayLock() {
+  const n = overlayCfg();
+  settings.overlay = { ...n, locked: !n.locked };
+  saveSettings();
+  applyOverlayLock();
+  broadcastOverlay();
 }
 
 /* ---------- Bandeja ---------- */
@@ -1747,6 +1886,18 @@ function buildMenu() {
       type: 'checkbox',
       checked: loginEnabled(),
       click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked, args: LOGIN_ARGS }),
+    },
+    {
+      label: `Overlay con datos sobre el juego  (${OVERLAY_SHORTCUT.replace('Control', 'Ctrl')})`,
+      type: 'checkbox',
+      checked: overlayOpen(),
+      click: (item) => setOverlayEnabled(item.checked),
+    },
+    {
+      label: `Bloquear overlay: los clics lo atraviesan  (${OVERLAY_LOCK_SHORTCUT.replace('Control', 'Ctrl')})`,
+      type: 'checkbox',
+      checked: !!overlayCfg().locked,
+      click: toggleOverlayLock,
     },
     { label: 'Buscar actualizaciones', click: checkForUpdates },
     { label: 'Copiar diagnóstico de sensores', click: async () => { try { clipboard.writeText(await buildDiag()); } catch {} } },
@@ -1814,6 +1965,9 @@ if (!app.requestSingleInstanceLock()) {
     startFastAudio();
     startDefWatch();
     globalShortcut.register(SHORTCUT, toggleWindow);
+    globalShortcut.register(OVERLAY_SHORTCUT, () => setOverlayEnabled(!overlayOpen()));
+    globalShortcut.register(OVERLAY_LOCK_SHORTCUT, toggleOverlayLock);
+    if (overlayCfg().enabled) openOverlay();   // se reabre si estaba activo al cerrar
 
     if (app.isPackaged) {
       // Instalaciones anteriores: pasar el inicio automático al modo "arrancar minimizado".

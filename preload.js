@@ -24,4 +24,11 @@ contextBridge.exposeInMainWorld('api', {
   onUpdate: (cb) => ipcRenderer.on('update:status', (_, s) => cb(s)),
   onShown: (cb) => ipcRenderer.on('ui:shown', () => cb()),
   onAudioChanged: (cb) => ipcRenderer.on('audio:changed', () => cb()),
+  overlayState: () => ipcRenderer.invoke('overlay:state'),
+  overlayToggle: () => ipcRenderer.invoke('overlay:toggle'),
+  overlaySet: (patch) => ipcRenderer.invoke('overlay:set', patch),
+  overlayClose: () => ipcRenderer.send('overlay:close'),
+  overlaySize: (w, h) => ipcRenderer.send('overlay:size', w, h),
+  overlayDrag: (d) => ipcRenderer.send('overlay:drag', d),
+  onOverlay: (cb) => ipcRenderer.on('overlay:changed', (_, st) => cb(st)),
 });

@@ -959,3 +959,17 @@ refresh();
 refreshPower();
 refreshSystem();
 setInterval(() => { if (!document.hidden) refreshActive(); }, 2000);
+
+/* ---------- Overlay (datos sobre el juego, tipo MSI Afterburner) ---------- */
+const overlayBtn = document.getElementById('overlay-btn');
+function setOverlayBtn(st) {
+  const on = !!(st && st.open);
+  overlayBtn.classList.toggle('on', on);
+  overlayBtn.setAttribute('aria-pressed', String(on));
+  overlayBtn.textContent = on ? 'Overlay: activo' : 'Overlay';
+}
+overlayBtn.addEventListener('click', async () => {
+  try { setOverlayBtn(await window.api.overlayToggle()); } catch { /* sin respuesta */ }
+});
+window.api.overlayState().then(setOverlayBtn).catch(() => {});
+window.api.onOverlay(setOverlayBtn);

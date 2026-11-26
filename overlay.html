@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:">
+  <title>Overlay</title>
+  <link rel="stylesheet" href="overlay.css">
+</head>
+<body>
+  <div id="ov" class="v">
+    <div id="bar">
+      <span class="grip" aria-hidden="true">⋮⋮</span>
+      <span class="spacer"></span>
+      <button id="b-cfg" type="button" title="Ajustes" aria-label="Ajustes">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1"/></svg>
+      </button>
+      <button id="b-lock" type="button" title="Bloquear: los clics lo atraviesan (se desbloquea con Ctrl+Alt+L)" aria-label="Bloquear">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+      </button>
+      <button id="b-x" type="button" title="Cerrar overlay" aria-label="Cerrar overlay">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <div id="rows" class="rows"></div>
+
+    <div id="cfg" hidden>
+      <p class="cfg-title">Mostrar</p>
+      <div class="opts">
+        <button type="button" data-item="fps">FPS</button>
+        <button type="button" data-item="gpu">GPU</button>
+        <button type="button" data-item="vram">VRAM</button>
+        <button type="button" data-item="cpu">CPU</button>
+        <button type="button" data-item="ram">RAM</button>
+        <button type="button" data-item="range">Mín–Máx FPS</button>
+      </div>
+      <p class="cfg-title">Disposición</p>
+      <div class="opts two">
+        <button type="button" data-orient="v">Vertical</button>
+        <button type="button" data-orient="h">Horizontal</button>
+      </div>
+      <div class="cfg-row"><span>Tamaño</span><button type="button" data-scale="-1" aria-label="Más pequeño">−</button><b id="v-scale">100%</b><button type="button" data-scale="1" aria-label="Más grande">+</button></div>
+      <div class="cfg-row"><span>Fondo</span><button type="button" data-op="-1" aria-label="Más transparente">−</button><b id="v-op">85%</b><button type="button" data-op="1" aria-label="Más opaco">+</button></div>
+      <p class="hint">Ctrl+Alt+O muestra u oculta · Ctrl+Alt+L bloquea y desbloquea</p>
+    </div>
+  </div>
+  <script src="overlay.js"></script>
+</body>
+</html>
