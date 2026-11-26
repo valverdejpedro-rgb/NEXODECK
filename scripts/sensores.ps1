@@ -131,38 +131,52 @@ function Write-Status {
   try { ($st | ConvertTo-Json -Compress) | Set-Content -Path $statusFile -Encoding UTF8 } catch {}
 }
 
+$demandFile = Join-Path $DataDir 'demand.txt'
+$tick = 0
 try {
   while ($true) {
     if ($ParentPid -gt 0 -and -not (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)) { break }
     (Get-Date).ToString('o') | Set-Content $beatFile
 
+    # La app escribe 1 mientras alguien mira los datos (ventana a la vista u overlay) y 0 si no.
+    # Sin nadie mirando, PresentMon se pausa (no tiene caso registrar FPS que nadie ve) y vuelve solo al hacer falta.
+    $want = $true
+    try { if (Test-Path $demandFile) { $want = ((Get-Content -LiteralPath $demandFile -TotalCount 1) -ne '0') } } catch {}
+
     if (Test-Path $pmExe) {
-      $exited = $pmProc -and $pmProc.HasExited
-      if ($exited -and $null -eq $script:pmLastExit) {
-        $script:pmLastExit = $pmProc.ExitCode
-        Log "PresentMon terminó con código $($pmProc.ExitCode)"
-      }
-      $sinceStart = ((Get-Date) - $pmStart).TotalSeconds
-      # Si se cierra solo, se reintenta como máximo cada 15 s (así no se borra el CSV en bucle).
-      # PresentMon escribe una fila por fotograma. Se reinicia solo si el archivo se vuelve enorme (más de 150 MB):
-      # reiniciarlo por tiempo cortaba los FPS en pleno juego.
-      $csvBig = $false
-      try { $csvBig = ((Get-Item -LiteralPath $csv -ErrorAction Stop).Length -ge 150MB) } catch {}
-      if ((-not $pmProc) -or ($exited -and $sinceStart -ge 15) -or ($csvBig -and $sinceStart -ge 600)) {
-        $script:pmRestarts++
-        $script:pmLastExit = $null
-        $pmProc = Start-OurPresentMon
-        $pmStart = Get-Date
+      if (-not $want) {
+        if ($pmProc -and -not $pmProc.HasExited) { Stop-OurPresentMon; $pmProc = $null; Log 'PresentMon en pausa (nadie mira los FPS)' }
+      } else {
+        $exited = $pmProc -and $pmProc.HasExited
+        if ($exited -and $null -eq $script:pmLastExit) {
+          $script:pmLastExit = $pmProc.ExitCode
+          Log "PresentMon terminó con código $($pmProc.ExitCode)"
+        }
+        $sinceStart = ((Get-Date) - $pmStart).TotalSeconds
+        # Si se cierra solo, se reintenta como máximo cada 15 s (así no se borra el CSV en bucle).
+        # PresentMon escribe una fila por fotograma. Se reinicia solo si el archivo se vuelve enorme (más de 150 MB):
+        # reiniciarlo por tiempo cortaba los FPS en pleno juego.
+        $csvBig = $false
+        try { $csvBig = ((Get-Item -LiteralPath $csv -ErrorAction Stop).Length -ge 150MB) } catch {}
+        if ((-not $pmProc) -or ($exited -and $sinceStart -ge 15) -or ($csvBig -and $sinceStart -ge 600)) {
+          $script:pmRestarts++
+          $script:pmLastExit = $null
+          $pmProc = Start-OurPresentMon
+          $pmStart = Get-Date
+        }
       }
     }
-    Write-Status
-    Write-Fans
-    Start-Sleep -Seconds 2
+    # Estado y ventiladores: cada ~6 s y solo si alguien mira (antes, cada 2 s siempre).
+    if ($want) {
+      if ($tick % 3 -eq 0) { Write-Status; Write-Fans }
+      $tick++
+    }
+    Start-Sleep -Seconds $(if ($want) { 2 } else { 4 })
   }
 }
 finally {
   Log 'Ayudante detenido'
   Stop-OurPresentMon
   if ($lhmProc -and -not $lhmProc.HasExited) { Stop-Process -Id $lhmProc.Id -Force -ErrorAction SilentlyContinue }
-  Remove-Item $beatFile, $pidFile, $csv, $statusFile, $fanFile -Force -ErrorAction SilentlyContinue
+  Remove-Item $beatFile, $pidFile, $csv, $statusFile, $fanFile, $demandFile -Force -ErrorAction SilentlyContinue
 }
