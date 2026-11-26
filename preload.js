@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('api', {
   overlayState: () => ipcRenderer.invoke('overlay:state'),
   overlayToggle: () => ipcRenderer.invoke('overlay:toggle'),
   overlaySet: (patch) => ipcRenderer.invoke('overlay:set', patch),
+  overlayProcesses: () => ipcRenderer.invoke('overlay:processes'),
   overlayClose: () => ipcRenderer.send('overlay:close'),
   overlaySize: (w, h) => ipcRenderer.send('overlay:size', w, h),
   overlayDrag: (d) => ipcRenderer.send('overlay:drag', d),

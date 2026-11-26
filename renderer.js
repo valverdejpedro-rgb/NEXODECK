@@ -120,7 +120,7 @@ async function refreshHeadset() {
 }
 
 // El preset del audífono se lee aparte y más seguido (cada 0,5 s) para que el cambio se vea casi al instante.
-setInterval(() => { if (!document.hidden && activeTab === 'home') refreshHeadset(); }, 500);
+setInterval(() => { if (!document.hidden && activeTab === 'home') refreshHeadset(); }, 2000);
 
 let refreshing = false;
 async function refresh() {
@@ -208,7 +208,7 @@ function renderUpdate(s) {
 }
 
 window.api.onUpdate(renderUpdate);
-window.api.onShown(() => refreshActive());
+window.api.onShown(() => { refreshActive(); refreshPower(true); });
 // El programa avisa cuando el dispositivo predeterminado cambió por fuera (Windows, otra app, enchufar/desenchufar)
 // o cuando terminó de aplicarlo a las apps: se actualiza al instante, sin esperar al siguiente ciclo.
 window.api.onAudioChanged(() => { if (!document.hidden) refreshActive(); });
@@ -606,11 +606,14 @@ async function choosePlan(id) {
     powerErrorEl.textContent = 'No se pudo cambiar el perfil de energía.';
   } finally { powerBusy--; }
   powerSig = '';
-  refreshPower();
+  refreshPower(true);
 }
 
-async function refreshPower() {
+let powerAt = 0;
+async function refreshPower(force) {
   if (powerBusy) return;
+  if (!force && Date.now() - powerAt < 8000) return;   // aviso: las demás llamadas no repiten la consulta a Windows
+  powerAt = Date.now();
   try {
     renderPower(await window.api.getPower());
     powerErrorEl.hidden = true;
@@ -948,17 +951,18 @@ sysEnableBtn.addEventListener('click', async () => {
 });
 
 
-// El sistema y los FPS se leen cada medio segundo mientras se ve Inicio.
-setInterval(() => { if (!document.hidden && activeTab === 'home') refreshSystem(); }, 500);
+// El sistema y los FPS se leen cada 0,7 s mientras se ve Inicio (nada se mide con la ventana oculta).
+setInterval(() => { if (!document.hidden && activeTab === 'home') refreshSystem(); }, 700);
 // Volumen y silencio se leen directo de Windows (milisegundos), así que se pueden consultar muy seguido.
-setInterval(() => { if (!document.hidden && activeTab === 'home') refresh(); }, 400);
-setInterval(() => { if (!document.hidden && activeTab === 'home') refreshHomeApps(); }, 700);
-setInterval(() => { if (!document.hidden && activeTab === 'apps') refreshApps(); }, 700);
+setInterval(() => { if (!document.hidden && activeTab === 'home') refresh(); }, 600);
+setInterval(() => { if (!document.hidden && activeTab === 'home') refreshHomeApps(); }, 1000);
+setInterval(() => { if (!document.hidden && activeTab === 'apps') refreshApps(); }, 1000);
 
 refresh();
 refreshPower();
 refreshSystem();
-setInterval(() => { if (!document.hidden) refreshActive(); }, 2000);
+// Los perfiles de energía casi nunca cambian por fuera: cada 10 s basta (antes se lanzaba powercfg cada 2 s).
+setInterval(() => { if (!document.hidden && activeTab === 'home') refreshPower(true); }, 10000);
 
 /* ---------- Overlay (datos sobre el juego, tipo MSI Afterburner) ---------- */
 const overlayBtn = document.getElementById('overlay-btn');
@@ -973,3 +977,67 @@ overlayBtn.addEventListener('click', async () => {
 });
 window.api.overlayState().then(setOverlayBtn).catch(() => {});
 window.api.onOverlay(setOverlayBtn);
+
+/* ---------- Juegos del overlay ---------- */
+const gamesModal = document.getElementById('games-modal');
+const gamesList = document.getElementById('games-list');
+const gamesStatus = document.getElementById('games-status');
+const gamesAutoBtn = document.getElementById('games-auto');
+let ovCfg = { games: [], auto: false };
+let ovRunning = [];     // procesos con ventana vistos la última vez que se abrió la lista
+
+function renderGames() {
+  gamesAutoBtn.classList.toggle('on', !!ovCfg.auto);
+  gamesAutoBtn.setAttribute('aria-pressed', String(!!ovCfg.auto));
+  const saved = new Set(ovCfg.games);
+  const rows = new Map();
+  for (const p of ovRunning) rows.set(p.name, { name: p.name, title: p.title, open: true });
+  for (const g of ovCfg.games) if (!rows.has(g)) rows.set(g, { name: g, title: 'No está abierto ahora', open: false });
+  const list = [...rows.values()].sort((a, b) => (saved.has(b.name) - saved.has(a.name)) || a.name.localeCompare(b.name));
+  gamesList.replaceChildren(...list.map((r) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = `game-row${saved.has(r.name) ? ' on' : ''}`;
+    b.setAttribute('aria-pressed', String(saved.has(r.name)));
+    const box = document.createElement('span'); box.className = 'box'; box.setAttribute('aria-hidden', 'true');
+    const t = document.createElement('span'); t.className = 'game-txt';
+    const n = document.createElement('b'); n.textContent = r.name;
+    const sub = document.createElement('small'); sub.textContent = r.title;
+    t.append(n, sub);
+    b.append(box, t);
+    b.addEventListener('click', () => {
+      const next = saved.has(r.name) ? ovCfg.games.filter((g) => g !== r.name) : [...ovCfg.games, r.name];
+      window.api.overlaySet({ games: next }).then((st) => { ovCfg = st; renderGames(); }).catch(() => {});
+    });
+    return b;
+  }));
+  if (!list.length) {
+    const p = document.createElement('p'); p.className = 'modal-status'; p.textContent = 'No se encontraron ventanas abiertas. Abre el juego y toca «Actualizar lista».';
+    gamesList.replaceChildren(p);
+  }
+}
+
+async function loadProcesses() {
+  gamesStatus.textContent = 'Buscando programas abiertos…';
+  document.getElementById('games-refresh').disabled = true;
+  try { ovRunning = (await window.api.overlayProcesses()).running || []; gamesStatus.textContent = `${ovRunning.length} programas con ventana`; }
+  catch { gamesStatus.textContent = 'No se pudo leer la lista de programas.'; }
+  document.getElementById('games-refresh').disabled = false;
+  renderGames();
+}
+
+async function openGames() {
+  gamesModal.hidden = false;
+  try { ovCfg = await window.api.overlayState(); } catch {}
+  renderGames();
+  loadProcesses();
+}
+document.getElementById('games-btn').addEventListener('click', openGames);
+document.getElementById('games-close').addEventListener('click', () => { gamesModal.hidden = true; });
+document.getElementById('games-refresh').addEventListener('click', loadProcesses);
+gamesModal.addEventListener('click', (e) => { if (e.target === gamesModal) gamesModal.hidden = true; });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !gamesModal.hidden) gamesModal.hidden = true; });
+gamesAutoBtn.addEventListener('click', () => {
+  window.api.overlaySet({ auto: !ovCfg.auto }).then((st) => { ovCfg = st; renderGames(); }).catch(() => {});
+});
+window.api.onOverlay((st) => { ovCfg = st; if (!gamesModal.hidden) renderGames(); });

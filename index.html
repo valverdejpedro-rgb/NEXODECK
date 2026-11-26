@@ -19,6 +19,7 @@
         <ul id="home-alert-list"></ul>
       </section>
       <footer>
+        <button id="games-btn" class="ghost" type="button" title="Elige los juegos donde se muestra el overlay">Juegos</button>
         <button id="overlay-btn" class="ghost" type="button" aria-pressed="false" title="Muestra los datos importantes sobre el juego, en cualquier parte de la pantalla (Ctrl+Alt+O)">Overlay</button>
         <span id="version"></span>
         <span id="update"></span>
@@ -93,6 +94,25 @@
       <div id="apps-list"></div>
       <p id="apps-empty" class="empty" hidden>No hay aplicaciones con audio abiertas. Abre un video o música y aparecerá aquí.</p>
       <p id="apps-error" class="error" hidden></p>
+    </div>
+
+    <div id="games-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="games-title" hidden>
+      <div class="modal-card">
+        <div class="modal-head">
+          <h2 id="games-title">Juegos del overlay</h2>
+          <button id="games-close" class="mini" type="button">Cerrar</button>
+        </div>
+        <p class="modal-help">Marca los juegos donde quieres ver el overlay. Mientras uno de ellos esté abierto, el overlay se mantiene encima y vuelve al frente si el juego lo tapa.</p>
+        <button id="games-auto" class="togglebar" type="button" aria-pressed="false">
+          <span class="box" aria-hidden="true"></span>
+          <span>Mostrar y ocultar el overlay solo con estos juegos</span>
+        </button>
+        <div id="games-list" class="games-list"></div>
+        <div class="modal-foot">
+          <button id="games-refresh" class="action" type="button">Actualizar lista</button>
+          <span id="games-status" class="modal-status"></span>
+        </div>
+      </div>
     </div>
   </main>
   <script src="renderer.js"></script>

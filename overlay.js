@@ -140,4 +140,4 @@ async function refresh() {
 window.api.onOverlay((st) => applyCfg(st));
 window.api.overlayState().then(applyCfg).catch(() => {});
 refresh();
-setInterval(refresh, 500);
+setInterval(refresh, 700);

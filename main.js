@@ -323,7 +323,7 @@ async function iconFor(p) {
 let micUse = { at: 0, map: new Map(), p: null };
 function readMicUse() {
   if (micUse.p) return micUse.p;
-  if (Date.now() - micUse.at < 1500) return Promise.resolve(micUse.map);
+  if (Date.now() - micUse.at < 2500) return Promise.resolve(micUse.map);
   micUse.p = new Promise((resolve) => {
     execFile('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone\\NonPackaged', '/s'],
       { windowsHide: true, timeout: 4000, maxBuffer: 4 * 1024 * 1024 }, (err, so) => {
@@ -632,8 +632,11 @@ async function defWatchTick() {
     if (a || b) { staleRows(); notifyAudioChanged(); }
   } catch {} finally { defWatch.busy = false; }
 }
+// 0,7 s con la ventana a la vista; 1,5 s si está oculta.
 function startDefWatch() {
-  if (!defWatch.timer) defWatch.timer = setInterval(defWatchTick, 700);
+  if (defWatch.timer) return;
+  const loop = async () => { await defWatchTick(); defWatch.timer = setTimeout(loop, (windowShown() || overlayOpen()) ? 700 : 1500); };
+  defWatch.timer = setTimeout(loop, 700);
 }
 // Volumen y silencio del MICRÓFONO de una app (sesión de entrada). Solo con el ayudante rápido: svcl no distingue
 // entre la sesión de salida y la de entrada de un mismo programa.
@@ -702,7 +705,7 @@ async function micWatchTick() {
   if (micWatch.busy) return;
   micWatch.busy = true;
   try {
-    const rows = await readItems();
+    const rows = await getRows(4500);   // comparte la lectura con la pantalla: no se lanza otro svcl.exe aparte
     const stAll = await listDevices(rows);
     await overlayDevices(stAll);
     checkDefaults(stAll);
@@ -727,9 +730,12 @@ async function micWatchTick() {
   } catch {} finally { micWatch.busy = false; }
 }
 
+// Cada ~5 s; si se está jugando, cada 15 s para no quitarle rendimiento al juego.
 function startMicWatch() {
   if (micWatch.timer) return;
-  micWatch.timer = setInterval(micWatchTick, 2000);
+  const delay = () => (gameRecently() ? 15000 : uiWatching() ? 5000 : 8000);
+  const loop = async () => { await micWatchTick(); micWatch.timer = setTimeout(loop, delay()); };
+  micWatch.timer = setTimeout(loop, 3000);
 }
 
 /* ---------- Audífonos Corsair (preset de ecualizador y batería, vía SDK de iCUE) ---------- */
@@ -812,7 +818,7 @@ function startCpuUtil() {
 while ($true) {
   $v = (Get-CimInstance -ClassName Win32_PerfFormattedData_Counters_ProcessorInformation -Filter "Name='_Total'").PercentProcessorUtility
   if ($null -ne $v) { try { [Console]::Out.WriteLine('CPU|' + [string]$v); [Console]::Out.Flush() } catch { break } }
-  Start-Sleep -Milliseconds 700
+  Start-Sleep -Milliseconds 1000
 }`;
   try {
     const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
@@ -884,7 +890,7 @@ function startNvStream() {
   if (nvStream.proc || !nvPath || !nvFields || !nvStream.count || Date.now() - nvStream.startedAt < 10000) return;
   nvStream.startedAt = Date.now();
   try {
-    const proc = spawn(nvPath, [`--query-gpu=${nvFields}`, '--format=csv,noheader,nounits', '-lms', '500'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    const proc = spawn(nvPath, [`--query-gpu=${nvFields}`, '--format=csv,noheader,nounits', '-lms', '1000'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
     nvStream.proc = proc; nvStream.buf = ''; nvStream.acc = [];
     proc.stdout.setEncoding('utf8');
     proc.stdout.on('data', (d) => {
@@ -1064,7 +1070,7 @@ while ($true) {
   }
   [void]$out.AppendLine('END')
   try { [Console]::Out.Write($out.ToString()); [Console]::Out.Flush() } catch { break }
-  Start-Sleep -Milliseconds 400
+  Start-Sleep -Milliseconds 700
 }`;
   try {
     const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
@@ -1169,14 +1175,21 @@ function collectLhm(node, out, depth = 0, hw = '') {
 }
 
 let lhmCache = { at: 0, sensors: null };
-async function readLhm() {
-  try {
-    const res = await fetch(LHM_URL, { signal: AbortSignal.timeout(900) });
-    if (!res.ok) return null;
-    const sensors = [];
-    collectLhm(await res.json(), sensors);
-    return sensors;
-  } catch { return null; }
+const lhmRead = { at: 0, sensors: null, p: null };
+function readLhm() {
+  if (lhmRead.sensors && Date.now() - lhmRead.at < 900) return Promise.resolve(lhmRead.sensors);
+  if (lhmRead.p) return lhmRead.p;
+  lhmRead.p = (async () => {
+    try {
+      const res = await fetch(LHM_URL, { signal: AbortSignal.timeout(900) });
+      if (!res.ok) { lhmRead.sensors = null; return null; }
+      const sensors = [];
+      collectLhm(await res.json(), sensors);
+      lhmRead.sensors = sensors; lhmRead.at = Date.now();
+      return sensors;
+    } catch { lhmRead.sensors = null; return null; } finally { lhmRead.p = null; }
+  })();
+  return lhmRead.p;
 }
 
 const IGNORE_TEMP = /distance|tjmax|limit|warning|critical|hysteresis|threshold/i;
@@ -1296,6 +1309,7 @@ function ingestFps() {
 
 // Último juego visto: evita que los FPS parpadeen cuando PresentMon entrega los datos a ráfagas.
 let lastGame = null;
+const gameRecently = () => !!(lastGame && Date.now() - lastGame.at < 20000);
 function currentGame() {
   const now = Date.now();
   const cands = [];
@@ -1477,7 +1491,10 @@ async function computeSysState() {
 }
 // La ventana principal y el overlay pueden pedir el estado casi a la vez: se calcula una sola vez cada 300 ms.
 const sysShared = { at: 0, p: null };
+let sysLastCallAt = 0;   // última vez que alguien (ventana a la vista u overlay) pidió datos del sistema
+const uiWatching = () => Date.now() - sysLastCallAt < 10000;
 ipcMain.handle('sys:state', () => {
+  sysLastCallAt = Date.now();
   if (sysShared.p && Date.now() - sysShared.at < 300) return sysShared.p;
   sysShared.at = Date.now();
   sysShared.p = computeSysState().catch((e) => { sysShared.p = null; throw e; });
@@ -1560,6 +1577,7 @@ async function buildDiag() {
 
   L.push('', '── Fuentes de uso (compáralas AL MISMO TIEMPO con el Administrador de tareas) ──');
   L.push(`CPU, tiempo ocupado (lo que dio la 1.0.5 y antes): ${cpuRaw.toFixed(1)} %`);
+  L.push(`Ahorro de recursos: ${uiWatching() ? 'alguien está mirando los datos' : 'nadie mira (lectores en pausa)'} · lectores abiertos → CPU ${cpuUtil.proc ? 'sí' : 'no'}, GPU ${gpuTm.proc ? 'sí' : 'no'}, nvidia-smi ${nvStream.proc ? 'sí' : 'no'} · overlay: ${overlayCfg().games.length} juego(s) elegidos${overlayCfg().auto ? ', modo automático' : ''}, ${gameWatch.running ? 'juego elegido abierto' : 'ninguno abierto'}`);
   L.push(`CPU, utilidad del procesador (contador de Windows, como el Administrador de tareas): ${cpuUtil.v != null ? cpuUtil.v.toFixed(1) + ' %  (hace ' + ago(cpuUtil.at) + ')' : 'SIN DATO'} · ayudante ${cpuUtil.proc ? 'corriendo' : 'detenido'}`);
   L.push(`CPU, lo que muestra la app ahora: ${cpuLast.usage.toFixed(1)} %`);
   const nvl = nvStream.latest || [];
@@ -1739,12 +1757,36 @@ function createWindow() {
   });
 }
 
+/* ---------- Ahorro de recursos: solo se mide mientras alguien mira ---------- */
+
+const windowShown = () => !!(win && !win.isDestroyed() && win.isVisible() && !win.isMinimized());
+function killHelper(o) { if (o.proc) { try { o.proc.kill(); } catch {} } }
+function writeDemand(on) {
+  try {
+    fs.mkdirSync(sensorDir(), { recursive: true });
+    fs.writeFileSync(path.join(sensorDir(), 'demand.txt'), on ? '1' : '0');
+  } catch {}
+}
+let lastDemand = null;
+function startPerfWatchdog() {
+  setInterval(() => {
+    const watching = uiWatching();
+    // El ayudante de administrador solo mantiene PresentMon (FPS) encendido si alguien está mirando los datos.
+    if (watching !== lastDemand) { lastDemand = watching; writeDemand(watching); }
+    // Sin nadie mirando durante 20 s, se cierran los lectores de CPU/GPU; se reabren solos al volver.
+    if (!watching && sysLastCallAt && Date.now() - sysLastCallAt > 20000) {
+      killHelper(gpuTm); killHelper(cpuUtil); killHelper(nvStream);
+    }
+  }, 3000);
+}
+
 /* ---------- Overlay: datos sobre el juego, al estilo de MSI Afterburner ---------- */
 
 const OVERLAY_SHORTCUT = 'Control+Alt+O';       // mostrar / ocultar
 const OVERLAY_LOCK_SHORTCUT = 'Control+Alt+L';  // bloquear / desbloquear (bloqueado: los clics lo atraviesan)
 const OVERLAY_DEFAULTS = {
   enabled: false, orient: 'v', scale: 1, opacity: 0.85, locked: false,
+  auto: false, games: [],    // juegos elegidos (nombre del .exe) y si el overlay se muestra/oculta solo con ellos
   items: { fps: true, gpu: true, vram: true, cpu: true, ram: true, range: false },
 };
 let overlayWin = null;
@@ -1821,6 +1863,10 @@ ipcMain.handle('overlay:set', (_e, patch) => {
     if (Number.isFinite(patch.scale)) n.scale = Math.min(1.8, Math.max(0.7, patch.scale));
     if (Number.isFinite(patch.opacity)) n.opacity = Math.min(1, Math.max(0.3, patch.opacity));
     if (typeof patch.locked === 'boolean') n.locked = patch.locked;
+    if (typeof patch.auto === 'boolean') n.auto = patch.auto;
+    if (Array.isArray(patch.games)) {
+      n.games = [...new Set(patch.games.filter((g) => typeof g === 'string').map((g) => g.trim().toLowerCase()).filter((g) => /^[^\\/:*?"<>|]{1,80}\.exe$/.test(g)))].slice(0, 40);
+    }
     if (patch.items && typeof patch.items === 'object') {
       for (const k of Object.keys(OVERLAY_DEFAULTS.items)) if (typeof patch.items[k] === 'boolean') n.items = { ...n.items, [k]: patch.items[k] };
     }
@@ -1828,6 +1874,7 @@ ipcMain.handle('overlay:set', (_e, patch) => {
   settings.overlay = n;
   saveSettings();
   applyOverlayLock();
+  scheduleGameWatch();
   return broadcastOverlay();
 });
 
@@ -1859,6 +1906,78 @@ ipcMain.on('overlay:drag', (_e, d) => {
     saveSettings();
   }
 });
+
+
+/* ---------- Juegos del overlay: elegir juegos, mostrar/ocultar solo y mantenerlo al frente ---------- */
+
+const NOT_PICKABLE = /^(svchost|runtimebroker|taskhostw|sihost|ctfmon|fontdrvhost|smartscreen|securityhealthsystray|tasklist|cmd|wmiprvse|dllhost|backgroundtaskhost|searchindexer|winlogon|csrss|lsass|services|system|registry|idle|conhost|wudfhost|audiodg|spoolsv|msedgewebview2|nvidia web helper|nvcontainer|amdrsserv|radeonsoftware|cncmd|cnext|rtss|rtsshooksloader|msiafterburner|presentmon|librehardwaremonitor)$/i;
+
+// Procesos con ventana (para elegir). Se llama solo cuando se abre la lista: tasklist /v tarda un poco.
+ipcMain.handle('overlay:processes', async () => {
+  const text = await new Promise((resolve) => execFile('cmd.exe', ['/d', '/s', '/c', 'chcp 65001>nul && tasklist /v /fo csv /nh'],
+    { windowsHide: true, timeout: 20000, encoding: 'buffer', maxBuffer: 32 * 1024 * 1024 }, (err, so) => resolve(err ? '' : so.toString('utf8'))));
+  const seen = new Map();
+  for (const line of text.split(/\r?\n/)) {
+    const f = [...line.matchAll(/"((?:[^"]|"")*)"/g)].map((m) => m[1].replace(/""/g, '"'));
+    if (f.length < 9) continue;
+    const name = f[0].trim().toLowerCase();
+    const title = f[8].trim();
+    if (!/\.exe$/.test(name) || !title || /^(n\/[ad]|no disponible|not available)$/i.test(title)) continue;
+    const base = name.replace(/\.exe$/, '');
+    if (NOT_GAMES.test(base) || NOT_PICKABLE.test(base)) continue;
+    if (!seen.has(name) || title.length > seen.get(name).length) seen.set(name, title);
+  }
+  const running = [...seen].map(([name, title]) => ({ name, title })).sort((a, b) => a.name.localeCompare(b.name));
+  return { running };
+});
+
+function runningNames() {
+  return new Promise((resolve) => {
+    execFile('tasklist', ['/fo', 'csv', '/nh'], { windowsHide: true, timeout: 8000, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 }, (err, so) => {
+      const set = new Set();
+      if (!err) for (const line of so.toString('latin1').split(/\r?\n/)) { const m = line.match(/^"([^"]+)"/); if (m) set.add(m[1].toLowerCase()); }
+      resolve(set);
+    });
+  });
+}
+
+const gameWatch = { timer: null, topTimer: null, running: false, busy: false };
+function stopTopLoop() { if (gameWatch.topTimer) { clearInterval(gameWatch.topTimer); gameWatch.topTimer = null; } }
+function startTopLoop() {
+  if (gameWatch.topTimer) return;
+  // Algunos juegos se ponen "siempre al frente" y tapan al overlay: mientras uno de los elegidos está abierto, se repone cada 1,5 s.
+  gameWatch.topTimer = setInterval(() => {
+    if (!overlayOpen()) return;
+    try { overlayWin.setAlwaysOnTop(true, 'screen-saver'); overlayWin.moveTop(); } catch {}
+  }, 1500);
+}
+
+async function gameWatchTick() {
+  if (gameWatch.busy) return;
+  gameWatch.busy = true;
+  try {
+    const cfg = overlayCfg();
+    if (!cfg.games.length) { gameWatch.running = false; stopTopLoop(); return; }
+    const names = await runningNames();
+    const now = cfg.games.some((g) => names.has(g));
+    if (now !== gameWatch.running) {
+      gameWatch.running = now;
+      // Solo se actúa al cambiar (juego que arranca / se cierra): si lo abres o cierras a mano en medio, se respeta.
+      if (cfg.auto) {
+        if (now) openOverlay(); else if (overlayOpen()) overlayWin.close();
+        broadcastOverlay(now);
+      }
+    }
+    if (now && overlayOpen()) startTopLoop(); else stopTopLoop();
+  } finally { gameWatch.busy = false; }
+}
+
+// Se vigila solo si hay juegos elegidos (cada 6 s; tasklist cuesta muy poco).
+function scheduleGameWatch() {
+  const has = overlayCfg().games.length > 0;
+  if (has && !gameWatch.timer) { gameWatch.timer = setInterval(gameWatchTick, 6000); gameWatchTick(); }
+  if (!has && gameWatch.timer) { clearInterval(gameWatch.timer); gameWatch.timer = null; gameWatch.running = false; stopTopLoop(); }
+}
 
 function toggleOverlayLock() {
   const n = overlayCfg();
@@ -1967,7 +2086,9 @@ if (!app.requestSingleInstanceLock()) {
     globalShortcut.register(SHORTCUT, toggleWindow);
     globalShortcut.register(OVERLAY_SHORTCUT, () => setOverlayEnabled(!overlayOpen()));
     globalShortcut.register(OVERLAY_LOCK_SHORTCUT, toggleOverlayLock);
-    if (overlayCfg().enabled) openOverlay();   // se reabre si estaba activo al cerrar
+    startPerfWatchdog();
+    if (overlayCfg().enabled && !overlayCfg().auto) openOverlay();   // se reabre si estaba activo al cerrar (en modo automático lo abre el juego)
+    scheduleGameWatch();
 
     if (app.isPackaged) {
       // Instalaciones anteriores: pasar el inicio automático al modo "arrancar minimizado".
